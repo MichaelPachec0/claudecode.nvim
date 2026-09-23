@@ -1212,6 +1212,52 @@ describe("claudecode.terminal (wrapper for Snacks.nvim)", function()
         assert.are.equal(456, bufnr)
       end)
 
+      it("routes per-tab toggle hides through a provider that owns its windows", function()
+        -- A provider exposing hide_session/get_session_window (Snacks park and
+        -- unpark) must be hidden through the provider, never window_manager.
+        local visible_win = 1000
+        local custom_provider = {
+          setup = spy.new(function() end),
+          open = spy.new(function() end),
+          close = spy.new(function() end),
+          simple_toggle = spy.new(function() end),
+          focus_toggle = spy.new(function() end),
+          get_active_bufnr = spy.new(function()
+            return nil
+          end),
+          is_available = spy.new(function()
+            return true
+          end),
+          open_session = spy.new(function() end),
+          get_session_window = spy.new(function()
+            return visible_win
+          end),
+          hide_session = spy.new(function() end),
+        }
+
+        terminal_wrapper.setup({ provider = custom_provider })
+        local sid = terminal_wrapper.open_new_session()
+        custom_provider.open_session:clear()
+
+        -- Visible -> simple_toggle parks it via the provider.
+        terminal_wrapper.simple_toggle()
+        custom_provider.hide_session:was_called(1)
+        custom_provider.hide_session:was_called_with(sid)
+        custom_provider.open_session:was_not_called()
+
+        -- Parked -> simple_toggle unparks it through open_session.
+        visible_win = nil
+        terminal_wrapper.simple_toggle()
+        custom_provider.open_session:was_called(1)
+
+        -- Visible and focused -> focus_toggle parks it via the provider.
+        visible_win = vim.api.nvim_get_current_win()
+        terminal_wrapper.focus_toggle()
+        custom_provider.hide_session:was_called(2)
+        custom_provider.simple_toggle:was_not_called()
+        custom_provider.focus_toggle:was_not_called()
+      end)
+
       it("should handle toggle function (legacy) correctly", function()
         local simple_toggle_spy = spy.new(function() end)
         local custom_provider = {

@@ -1137,9 +1137,13 @@ local function ensure_terminal_visible_no_focus(opts_override, cmd_args)
   local cmd_string, claude_env_table = get_claude_command_and_env(cmd_args)
 
   if provider.open_session then
-    -- Per-tab path
+    -- Per-tab path. A provider that owns its windows can have a live but
+    -- parked terminal (e.g. a config-hidden Snacks float); re-show it then.
     if current_tab_has_live_terminal() then
-      return true
+      local tab_sid = current_tab_session()
+      if not provider.get_session_window or provider.get_session_window(tab_sid) then
+        return true
+      end
     end
     local session_id, newly_created = ensure_current_tab_session()
     provider.open_session(session_id, cmd_string, claude_env_table, effective_config, false)
@@ -1533,12 +1537,23 @@ function M.simple_toggle(opts_override, cmd_args)
 
   if provider.open_session then
     -- Per-tab path
-    local window_manager = require("claudecode.terminal.window_manager")
+    if provider.hide_session then
+      -- Provider owns its windows (Snacks park/unpark): hide through it so a
+      -- float is config-hidden rather than destroyed (climbing cursor, #271).
+      local tab_sid = current_tab_session()
+      if tab_sid and provider.get_session_window(tab_sid) then
+        provider.hide_session(tab_sid)
+        detach_tabbar()
+        return
+      end
+    else
+      local window_manager = require("claudecode.terminal.window_manager")
 
-    if window_manager.is_visible() and current_tab_has_live_terminal() then
-      window_manager.close_window()
-      detach_tabbar()
-      return
+      if window_manager.is_visible() and current_tab_has_live_terminal() then
+        window_manager.close_window()
+        detach_tabbar()
+        return
+      end
     end
 
     local session_id, newly_created = ensure_current_tab_session()
@@ -1597,20 +1612,32 @@ function M.focus_toggle(opts_override, cmd_args)
   local provider = get_provider()
 
   if provider.open_session then
-    local window_manager = require("claudecode.terminal.window_manager")
-
-    if window_manager.is_visible() and current_tab_has_live_terminal() then
-      local winid = window_manager.get_window()
-      local current_win = vim.api.nvim_get_current_win()
-      if winid == current_win then
-        window_manager.close_window()
+    if provider.hide_session then
+      -- Provider owns its windows (Snacks park/unpark). Focused -> park it;
+      -- visible but unfocused -> open_session below focuses it via the provider.
+      local tab_sid = current_tab_session()
+      local winid = tab_sid and provider.get_session_window(tab_sid)
+      if winid and winid == vim.api.nvim_get_current_win() then
+        provider.hide_session(tab_sid)
         detach_tabbar()
         return
       end
-      if winid then
-        vim.api.nvim_set_current_win(winid)
-        pcall(vim.cmd, "startinsert")
-        return
+    else
+      local window_manager = require("claudecode.terminal.window_manager")
+
+      if window_manager.is_visible() and current_tab_has_live_terminal() then
+        local winid = window_manager.get_window()
+        local current_win = vim.api.nvim_get_current_win()
+        if winid == current_win then
+          window_manager.close_window()
+          detach_tabbar()
+          return
+        end
+        if winid then
+          vim.api.nvim_set_current_win(winid)
+          pcall(vim.cmd, "startinsert")
+          return
+        end
       end
     end
 

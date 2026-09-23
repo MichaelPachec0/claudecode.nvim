@@ -11,6 +11,7 @@ describe("claudecode.terminal.snacks command handling", function()
   local spy
   local captured
   local mock_snacks
+  local saved_modules
 
   local function make_term_instance()
     return {
@@ -34,6 +35,15 @@ describe("claudecode.terminal.snacks command handling", function()
     spy = require("luassert.spy")
 
     _G.vim = {
+      -- Mock additions for the session-aware provider (buffer flag, pid retry,
+      -- BufUnload hook, tabpage scoping).
+      b = setmetatable({}, {
+        __index = function(t, buf)
+          rawset(t, buf, {})
+          return rawget(t, buf)
+        end,
+      }),
+      defer_fn = function() end,
       log = { levels = { ERROR = 3, WARN = 2, INFO = 1, DEBUG = 0 } },
       notify = spy.new(function() end),
       inspect = function(v)
@@ -75,6 +85,17 @@ describe("claudecode.terminal.snacks command handling", function()
         return res
       end,
       api = {
+        -- Mock additions for the session-aware provider.
+        nvim_create_autocmd = function() end,
+        nvim_buf_get_var = function()
+          error("no terminal_job_id in mock")
+        end,
+        nvim_win_get_tabpage = function()
+          return 1
+        end,
+        nvim_get_current_tabpage = function()
+          return 1
+        end,
         nvim_buf_is_valid = function()
           return true
         end,
@@ -106,6 +127,25 @@ describe("claudecode.terminal.snacks command handling", function()
     }
 
     package.loaded["snacks"] = mock_snacks
+
+    -- Multi-session collaborators (mock additions for the session-aware
+    -- provider): the terminal module's session hooks and the OSC handler.
+    saved_modules = {
+      ["claudecode.terminal"] = package.loaded["claudecode.terminal"],
+      ["claudecode.terminal.osc_handler"] = package.loaded["claudecode.terminal.osc_handler"],
+    }
+    package.loaded["claudecode.terminal"] = {
+      defaults = { cleanup_strategy = "jobstop_only" },
+      register_buffer_session = function() end,
+      update_session_terminal_info = function() end,
+      setup_terminal_keymaps = function() end,
+      setup_scroll_keymaps = function() end,
+      track_terminal_pid = function() end,
+    }
+    package.loaded["claudecode.terminal.osc_handler"] = {
+      setup_buffer_handler = function() end,
+      cleanup_buffer_handler = function() end,
+    }
     package.loaded["claudecode.logger"] = {
       debug = spy.new(function() end),
       info = spy.new(function() end),
@@ -122,6 +162,9 @@ describe("claudecode.terminal.snacks command handling", function()
 
   after_each(function()
     _G.vim = original_vim
+    for name, mod in pairs(saved_modules) do
+      package.loaded[name] = mod
+    end
     package.loaded["snacks"] = nil
     package.loaded["claudecode.utils"] = nil
     package.loaded["claudecode.logger"] = nil
@@ -133,7 +176,6 @@ describe("claudecode.terminal.snacks command handling", function()
   end
 
   it("passes a bracketed model alias to Snacks as an argv list, not a shell string", function()
-    pending("re-ported in Task 7: Snacks argv command handling (parse_command)")
     snacks_provider.open("claude --model opus[1m]", { FOO = "bar" }, base_config(), true)
 
     assert.spy(mock_snacks.terminal.open).was_called(1)
@@ -142,7 +184,6 @@ describe("claudecode.terminal.snacks command handling", function()
   end)
 
   it("wraps an argument-less command in a single-element list", function()
-    pending("re-ported in Task 7: Snacks argv command handling (parse_command)")
     snacks_provider.open("claude", {}, base_config(), true)
 
     assert.is_table(captured.cmd)
@@ -150,7 +191,6 @@ describe("claudecode.terminal.snacks command handling", function()
   end)
 
   it("keeps quoted arguments intact instead of splitting on inner spaces", function()
-    pending("re-ported in Task 7: Snacks argv command handling (parse_command)")
     snacks_provider.open("claude --message='hello world'", {}, base_config(), true)
 
     assert.is_table(captured.cmd)
@@ -158,7 +198,6 @@ describe("claudecode.terminal.snacks command handling", function()
   end)
 
   it("expands a tilde in terminal_cmd before handing argv to Snacks", function()
-    pending("re-ported in Task 7: Snacks argv command handling (parse_command)")
     local home = os.getenv("HOME")
     snacks_provider.open("~/.claude/local/claude", {}, base_config(), true)
 

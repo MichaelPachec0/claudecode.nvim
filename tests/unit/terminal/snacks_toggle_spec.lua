@@ -18,6 +18,7 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
   local next_win_id
   local next_buf_id
   local mock_snacks
+  local saved_modules
   local open_show_spy
   local last_split_cmd
 
@@ -87,6 +88,15 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
     end)
 
     _G.vim = {
+      -- Mock additions for the session-aware provider (buffer flag, pid retry,
+      -- BufUnload hook, tabpage scoping).
+      b = setmetatable({}, {
+        __index = function(t, buf)
+          rawset(t, buf, {})
+          return rawget(t, buf)
+        end,
+      }),
+      defer_fn = function() end,
       log = { levels = { ERROR = 3, WARN = 2, INFO = 1, DEBUG = 0 } },
       notify = spy.new(function() end),
       inspect = function(v)
@@ -149,6 +159,17 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
         return result
       end,
       api = {
+        -- Mock additions for the session-aware provider.
+        nvim_create_autocmd = function() end,
+        nvim_buf_get_var = function()
+          error("no terminal_job_id in mock")
+        end,
+        nvim_win_get_tabpage = function()
+          return 1
+        end,
+        nvim_get_current_tabpage = function()
+          return 1
+        end,
         nvim_buf_is_valid = function(b)
           return b ~= nil and b >= 1
         end,
@@ -208,6 +229,25 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
     }
 
     package.loaded["snacks"] = mock_snacks
+
+    -- Multi-session collaborators (mock additions for the session-aware
+    -- provider): the terminal module's session hooks and the OSC handler.
+    saved_modules = {
+      ["claudecode.terminal"] = package.loaded["claudecode.terminal"],
+      ["claudecode.terminal.osc_handler"] = package.loaded["claudecode.terminal.osc_handler"],
+    }
+    package.loaded["claudecode.terminal"] = {
+      defaults = { cleanup_strategy = "jobstop_only" },
+      register_buffer_session = function() end,
+      update_session_terminal_info = function() end,
+      setup_terminal_keymaps = function() end,
+      setup_scroll_keymaps = function() end,
+      track_terminal_pid = function() end,
+    }
+    package.loaded["claudecode.terminal.osc_handler"] = {
+      setup_buffer_handler = function() end,
+      cleanup_buffer_handler = function() end,
+    }
     package.loaded["claudecode.logger"] = {
       debug = function() end,
       info = function() end,
@@ -221,6 +261,9 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
 
   after_each(function()
     _G.vim = original_vim
+    for name, mod in pairs(saved_modules) do
+      package.loaded[name] = mod
+    end
     package.loaded["snacks"] = nil
     package.loaded["claudecode.utils"] = nil
     package.loaded["claudecode.logger"] = nil
@@ -241,7 +284,6 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
   end
 
   it("split: simple_toggle hides by closing the window and shows by recreating it", function()
-    pending("re-ported in Task 7: Snacks hide/show parking (#271)")
     snacks_provider.open("claude", {}, split_config(), true)
     local term = snacks_provider._get_terminal_for_test()
     assert.is_not_nil(term.win)
@@ -263,7 +305,6 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
   end)
 
   it("float: simple_toggle config-hides (hide=true) and shows (hide=false) without closing", function()
-    pending("re-ported in Task 7: Snacks hide/show parking (#271)")
     snacks_provider.open("claude", {}, float_config(), true)
     local term = snacks_provider._get_terminal_for_test()
     local win = term.win
@@ -280,7 +321,6 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
   end)
 
   it("treats a config-hidden float as not visible (so a send/open re-shows it)", function()
-    pending("re-ported in Task 7: Snacks hide/show parking (#271)")
     snacks_provider.open("claude", {}, float_config(), true)
     local term = snacks_provider._get_terminal_for_test()
     windows[term.win].config.hide = true
@@ -292,7 +332,6 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
   end)
 
   it("split close that errors (E444 last window) does not throw and keeps state sane", function()
-    pending("re-ported in Task 7: Snacks hide/show parking (#271)")
     snacks_provider.open("claude", {}, split_config(), true)
     local term = snacks_provider._get_terminal_for_test()
     local win = term.win
@@ -308,7 +347,6 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
   end)
 
   it("externally-closed float reopens as a float (via Snacks), not a split", function()
-    pending("re-ported in Task 7: Snacks hide/show parking (#271)")
     snacks_provider.open("claude", {}, float_config(), true)
     local term = snacks_provider._get_terminal_for_test()
     -- External close (e.g. :q): window dies but buffer survives; no cc_hide ran.
@@ -322,7 +360,6 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
   end)
 
   it("reuses the existing terminal on a second open() without error", function()
-    pending("re-ported in Task 7: Snacks hide/show parking (#271)")
     snacks_provider.open("claude", {}, split_config(), true)
     local term = snacks_provider._get_terminal_for_test()
     local win = term.win
@@ -335,7 +372,6 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
   end)
 
   it("recreates a top/bottom position as a horizontal split, not a vsplit", function()
-    pending("re-ported in Task 7: Snacks hide/show parking (#271)")
     local function bottom_config()
       return {
         cwd = "/w",
@@ -355,7 +391,6 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
   end)
 
   it("recreates an unsupported position (e.g. current) via Snacks, not a raw split", function()
-    pending("re-ported in Task 7: Snacks hide/show parking (#271)")
     local function current_config()
       return {
         cwd = "/w",
@@ -369,5 +404,26 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
     snacks_provider.simple_toggle("claude", {}, current_config()) -- hide (close)
     snacks_provider.simple_toggle("claude", {}, current_config()) -- show
     assert.spy(open_show_spy).was_called() -- delegated to Snacks
+  end)
+
+  -- Multi-session: each session owns its own Snacks instance, and switching
+  -- sessions parks the outgoing one (cc_hide) and unparks the target (cc_show)
+  -- instead of destroying and recreating windows.
+  it("parks the previous float instead of closing it when switching sessions", function()
+    snacks_provider.open_session("s1", "claude", {}, float_config(), true)
+    local s1_win = current_win
+    snacks_provider.open_session("s2", "claude", {}, float_config(), true)
+    -- Opening s2 parks s1's float (config-hidden, window kept alive).
+    assert.is_true(windows[s1_win].valid)
+    assert.is_true(windows[s1_win].config.hide)
+    snacks_provider.focus_session("s1", float_config())
+    assert.is_true(windows[s1_win].valid) -- not destroyed
+    assert.is_false(windows[s1_win].config.hide == true) -- s1 visible again
+  end)
+
+  it("patches every session instance (hide keeps the process)", function()
+    snacks_provider.open_session("s1", "claude", {}, split_config(), true)
+    snacks_provider.simple_toggle("claude", {}, split_config())
+    assert.is_not_nil(snacks_provider.get_session_bufnr("s1"))
   end)
 end)
