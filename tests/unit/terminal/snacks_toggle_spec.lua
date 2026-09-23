@@ -96,6 +96,12 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
         fn()
       end,
       o = { columns = 120, lines = 40 },
+      bo = setmetatable({}, {
+        __index = function(t, buf)
+          rawset(t, buf, {})
+          return rawget(t, buf)
+        end,
+      }),
       w = setmetatable({}, {
         __index = function(t, win)
           rawset(t, win, rawget(t, win) or {})

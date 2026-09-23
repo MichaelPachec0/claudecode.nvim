@@ -133,6 +133,7 @@ local function open_terminal(cmd_string, env_table, effective_config, focus)
   bufnr = vim.api.nvim_get_current_buf()
   vim.bo[bufnr].bufhidden = "hide"
   vim.bo[bufnr].buflisted = false
+  vim.bo[bufnr].filetype = "claudecode"
   -- buftype=terminal is set by termopen
 
   -- Shift+Enter inserts a line continuation (backslash + newline) in the terminal

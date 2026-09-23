@@ -43,6 +43,12 @@ describe("claudecode.terminal.snacks command handling", function()
         fn()
       end,
       cmd = function() end,
+      bo = setmetatable({}, {
+        __index = function(t, buf)
+          rawset(t, buf, {})
+          return rawget(t, buf)
+        end,
+      }),
       split = function(str, sep, _opts)
         local result = {}
         local start = 1
