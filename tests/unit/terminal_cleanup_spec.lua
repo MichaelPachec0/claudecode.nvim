@@ -138,6 +138,27 @@ describe("terminal cleanup_all", function()
     assert.are.same({}, system_calls)
   end)
 
+  it("should not write any file (no debug log) for any kill strategy", function()
+    local opened = {}
+    local real_open = io.open
+    -- Record the path and refuse the open, so a regression cannot touch disk.
+    io.open = function(path)
+      table.insert(opened, tostring(path))
+      return nil
+    end
+    local ok, err = pcall(function()
+      for _, strategy in ipairs({ "pkill_children", "aggressive", "jobstop_only", "none" }) do
+        terminal.defaults.cleanup_strategy = strategy
+        terminal.track_terminal_pid(42)
+        terminal.cleanup_all()
+      end
+    end)
+    io.open = real_open
+    terminal.defaults.cleanup_strategy = "pkill_children"
+    assert.is_true(ok, tostring(err))
+    assert.are.same({}, opened)
+  end)
+
   it("should kill tracked PIDs", function()
     -- Track a PID
     terminal.track_terminal_pid(42)

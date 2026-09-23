@@ -2090,15 +2090,6 @@ function M.cleanup_all()
     table.insert(job_ids_to_stop, job_id)
   end
 
-  -- DEBUG: Write to file so we can see what happens after Neovim exits
-  local debug_file = io.open("/tmp/claudecode_cleanup_debug.log", "a")
-  if debug_file then
-    debug_file:write(
-      os.date() .. " cleanup_all: strategy=" .. strategy .. ", pids=" .. table.concat(pids_to_kill, ",") .. "\n"
-    )
-    debug_file:close()
-  end
-
   logger.debug("terminal", "cleanup_all: strategy=" .. strategy .. ", found " .. #pids_to_kill .. " PIDs")
 
   -- Handle "none" strategy - don't kill anything
@@ -2125,12 +2116,6 @@ function M.cleanup_all()
     end
     local cmd = table.concat(kill_cmds, "; ") .. "; true"
 
-    debug_file = io.open("/tmp/claudecode_cleanup_debug.log", "a")
-    if debug_file then
-      debug_file:write(os.date() .. " pkill_children command: " .. cmd .. "\n")
-      debug_file:close()
-    end
-
     vim.fn.system(cmd)
 
     -- Give processes time to die gracefully
@@ -2148,12 +2133,6 @@ function M.cleanup_all()
     end
     local cmd9 = table.concat(kill9_cmds, "; ") .. "; true"
 
-    debug_file = io.open("/tmp/claudecode_cleanup_debug.log", "a")
-    if debug_file then
-      debug_file:write(os.date() .. " SIGKILL followup: " .. cmd9 .. "\n")
-      debug_file:close()
-    end
-
     vim.fn.system(cmd9)
     logger.debug("terminal", "cleanup_all: killed process trees of PIDs: " .. table.concat(pids_to_kill, ", "))
   end
@@ -2168,12 +2147,6 @@ function M.cleanup_all()
       table.insert(kill_cmds, "kill -KILL " .. pid)
     end
     local cmd = table.concat(kill_cmds, "; ") .. "; true"
-
-    debug_file = io.open("/tmp/claudecode_cleanup_debug.log", "a")
-    if debug_file then
-      debug_file:write(os.date() .. " aggressive kill command: " .. cmd .. "\n")
-      debug_file:close()
-    end
 
     vim.fn.system(cmd)
     logger.debug("terminal", "cleanup_all: aggressively killed PIDs: " .. table.concat(pids_to_kill, ", "))
