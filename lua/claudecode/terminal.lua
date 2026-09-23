@@ -1759,6 +1759,41 @@ function M.get_active_terminal_bufnr()
   return get_provider().get_active_bufnr()
 end
 
+---Resolve the terminal buffer that a session-scoped sender (send_to_terminal)
+---should target. Unlike M.get_active_terminal_bufnr(), which reports a
+---provider's single legacy pointer, this prefers the session actually bound to
+---the current tab so that sending text always reaches the pane the user is
+---looking at, not whichever session a provider last focused globally:
+---  1. The current tab's visible session (covers a window-owning provider,
+---     e.g. Snacks, where the tab's active pointer can name a parked session).
+---  2. The current tab's active session id (session_manager.get_active_session_id()
+---     is itself tab-aware; see claudecode.session).
+---  3. The provider's legacy get_active_bufnr(), for providers with no
+---     per-session concept at all (custom single-terminal providers).
+---@param provider ClaudeCodeTerminalProvider The terminal provider module
+---@return number|nil bufnr
+local function resolve_send_target_bufnr(provider)
+  if provider.get_session_bufnr then
+    local visible_sid = visible_tab_session(provider)
+    if visible_sid then
+      local bufnr = provider.get_session_bufnr(visible_sid)
+      if bufnr then
+        return bufnr
+      end
+    end
+
+    local active_sid = session_manager.get_active_session_id()
+    if active_sid then
+      local bufnr = provider.get_session_bufnr(active_sid)
+      if bufnr then
+        return bufnr
+      end
+    end
+  end
+
+  return provider.get_active_bufnr()
+end
+
 ---Sends raw text to the running Claude Code terminal's job channel, as if it were
 ---typed at the prompt. By default a trailing carriage return submits the line.
 ---
@@ -1767,6 +1802,10 @@ end
 ---returns false. This function is synchronous and does NOT open the terminal: it
 ---requires one to already be running, otherwise it warns and returns false. The
 ---`:ClaudeCodeSendText` command is a thin wrapper around this.
+---
+---Targets the active session (see resolve_send_target_bufnr), not necessarily
+---whichever terminal a provider last focused: this matters once switching
+---sessions or tabs is in play (#164).
 ---
 ---Multi-line text is wrapped in bracketed-paste markers (ESC[200~ ... ESC[201~) so
 ---embedded newlines arrive as one literal pasted block rather than several premature
@@ -1787,7 +1826,7 @@ function M.send_to_terminal(text, opts)
   opts = opts or {}
   local submit = opts.submit ~= false
 
-  local bufnr = M.get_active_terminal_bufnr()
+  local bufnr = resolve_send_target_bufnr(get_provider())
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     local provider_name = type(defaults.provider) == "string" and defaults.provider or "custom"
     if provider_name == "none" or provider_name == "external" then
