@@ -318,8 +318,20 @@ function M.open(cmd_string, env_table, effective_config, focus)
   end
 end
 
+---Stop the active session's terminal job and close the managed window.
+---Session and buffer bookkeeping is handled by the on_exit handler installed
+---in create_terminal_buffer, not here. Other sessions are left untouched.
 function M.close()
   local window_manager = require("claudecode.terminal.window_manager")
+
+  local active_id = session_manager.get_active_session_id()
+  local active_state = active_id and terminals[active_id]
+  local active_jobid = (active_state and active_state.jobid) or jobid
+
+  if active_jobid then
+    pcall(vim.fn.jobstop, active_jobid)
+  end
+
   window_manager.close_window()
 end
 

@@ -399,7 +399,6 @@ describe("claudecode.terminal.native toggle behavior", function()
 
   describe("close vs toggle behavior", function()
     it("should preserve process on toggle but kill on close", function()
-      pending("re-ported in Task 5: close() must stop the terminal job (upstream ClaudeCodeClose semantics)")
       local cmd_string = "claude"
       local env_table = { TEST = "value" }
       local config = { split_side = "right", split_width_percentage = 0.3 }
