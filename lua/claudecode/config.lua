@@ -140,6 +140,12 @@ function M.validate(config)
     end
   end
 
+  -- Validate tui_keymaps if present (D2: master switch for #164's scroll/mouse remaps)
+  assert(
+    config.terminal.tui_keymaps == nil or type(config.terminal.tui_keymaps) == "boolean",
+    "terminal.tui_keymaps must be a boolean"
+  )
+
   -- Validate cleanup_strategy if present
   if config.terminal.cleanup_strategy ~= nil then
     local valid_strategies = { "pkill_children", "jobstop_only", "aggressive", "none" }

@@ -1049,17 +1049,18 @@ describe("claudecode.terminal (wrapper for Snacks.nvim)", function()
           }
         end
 
-        -- Default (true) reaches the provider, so Snacks installs the maps too.
+        -- Default (false, Task 9: opt-in) reaches the provider, so Snacks stays
+        -- off by default too.
         local open_default = spy.new(function() end)
         terminal_wrapper.setup({ provider = make_provider(open_default) })
         terminal_wrapper.open({}, nil)
-        assert.is_true(open_default:get_call(1).refs[3].split_navigation)
+        assert.is_false(open_default:get_call(1).refs[3].split_navigation)
 
-        -- An explicit false is forwarded as well.
-        local open_off = spy.new(function() end)
-        terminal_wrapper.setup({ provider = make_provider(open_off), split_navigation = false })
+        -- An explicit true is forwarded as well (opt-in).
+        local open_on = spy.new(function() end)
+        terminal_wrapper.setup({ provider = make_provider(open_on), split_navigation = true })
         terminal_wrapper.open({}, nil)
-        assert.is_false(open_off:get_call(1).refs[3].split_navigation)
+        assert.is_true(open_on:get_call(1).refs[3].split_navigation)
       end)
     end)
 
@@ -1803,5 +1804,64 @@ describe("claudecode.terminal (wrapper for Snacks.nvim)", function()
       assert.equals("<Esc><Esc>", set_calls[1].lhs)
       assert.equals("<C-\\><C-n>", set_calls[1].rhs)
     end)
+  end)
+end)
+
+-- Task 9: opt-in defaults for #164's terminal-buffer keymaps (D1, D2). This
+-- describe block is intentionally a sibling of the top-level describe above
+-- (not nested inside it): that describe shadows the busted global `spy` with
+-- a hand-rolled fake (see its `before_each`), which is not compatible with
+-- assert.spy()/match. Staying outside its lexical scope keeps the real
+-- busted spy/match/assert available here.
+describe("claudecode.terminal opt-in keymaps defaults (Task 9)", function()
+  local terminal
+
+  before_each(function()
+    -- The top-level describe above tears down _G.vim to nil in its own
+    -- after_each; (re)establish the shared mock for this sibling describe.
+    _G.vim = require("tests.mocks.vim")
+    if _G.vim._mock and _G.vim._mock.reset then
+      _G.vim._mock.reset()
+    end
+    package.loaded["claudecode.terminal"] = nil
+    terminal = require("claudecode.terminal")
+    stub(vim.api, "nvim_buf_is_valid", function()
+      return true
+    end)
+  end)
+
+  after_each(function()
+    vim.api.nvim_buf_is_valid:revert()
+    _G.vim = nil
+  end)
+
+  it("installs no terminal-buffer keymaps with default config", function()
+    local set = spy.on(vim.keymap, "set")
+    terminal.setup_terminal_keymaps(12, terminal.defaults)
+    terminal.setup_scroll_keymaps(12, terminal.defaults)
+    assert.spy(set).was_not_called()
+    set:revert()
+  end)
+
+  it("installs smart ESC only when esc_timeout > 0", function()
+    local set = spy.on(vim.keymap, "set")
+    terminal.setup_terminal_keymaps(12, vim.tbl_extend("force", terminal.defaults, { esc_timeout = 200 }))
+    assert.spy(set).was_called_with("t", "<Esc>", match._, match._)
+    set:revert()
+  end)
+
+  it("installs the scroll/mouse remaps only when tui_keymaps is true", function()
+    local set = spy.on(vim.keymap, "set")
+    terminal.setup_scroll_keymaps(12, vim.tbl_extend("force", terminal.defaults, { tui_keymaps = true }))
+    assert.spy(set).was_called()
+    set:revert()
+  end)
+
+  it("installs split navigation only when split_navigation is true", function()
+    local set = spy.on(vim.keymap, "set")
+    terminal.setup_terminal_keymaps(12, vim.tbl_extend("force", terminal.defaults, { split_navigation = true }))
+    assert.spy(set).was_called_with("t", "<C-h>", match._, match._)
+    assert.spy(set).was_called_with("n", "<C-h>", match._, match._)
+    set:revert()
   end)
 end)

@@ -102,8 +102,9 @@
 ---@field git_repo_cwd boolean|nil      -- use git root of current file/cwd as working directory
 ---@field cwd_provider? ClaudeCodeCwdProvider -- custom function to compute working directory
 ---@field fix_streamed_paste boolean|"auto"|nil -- work around Neovim <0.12.2 terminal paste fragmentation (#161); "auto" (default) enables only on affected versions
----@field split_navigation boolean? -- enable Ctrl+h/j/k/l to navigate splits from terminal mode
----@field scroll_up_enabled boolean? -- true: exit terminal mode on scroll to browse Neovim scrollback; false (default): no scroll keymaps, wheel events forwarded to Claude Code TUI
+---@field split_navigation boolean? -- enable Ctrl+h/j/k/l to navigate splits from terminal mode; false (default): upstream behavior, no split-navigation keymaps
+---@field tui_keymaps boolean? -- master switch for the TUI scroll/mouse remaps installed by setup_scroll_keymaps; false (default): none installed (upstream behavior)
+---@field scroll_up_enabled boolean? -- only consulted when tui_keymaps is true; true: exit terminal mode on scroll to browse Neovim scrollback; false (default): guarded scroll keymaps forward wheel events to the Claude Code TUI
 
 -- Port range configuration
 ---@class ClaudeCodePortRange

@@ -369,5 +369,11 @@ describe("Configuration", function()
     expect(tostring(err)).to_match("must be a string or function")
   end)
 
+  it("rejects non-boolean tui_keymaps", function()
+    assert.has_error(function()
+      config.apply({ terminal = { tui_keymaps = "yes" } })
+    end)
+  end)
+
   teardown()
 end)

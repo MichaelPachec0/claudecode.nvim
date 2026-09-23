@@ -233,21 +233,31 @@ local defaults = {
   cwd = nil, -- static cwd override
   git_repo_cwd = false, -- resolve to git root when spawning
   cwd_provider = nil, -- function(ctx) -> cwd string
-  -- Scroll behaviour in terminal mode.
-  -- false (default): no scroll keymaps — Neovim forwards wheel events to the Claude Code
-  --   TUI when it has mouse tracking enabled, matching regular-terminal behaviour.
+  -- Master switch for the TUI scroll/mouse remaps installed by setup_scroll_keymaps
+  -- (normal-mode j/k/<Up>, mouse wheel, <PageUp>/<PageDown>, <LeftDrag>). false (default):
+  -- none of those keymaps are installed, matching plain-terminal (upstream) behaviour.
+  -- true: install them; scroll_up_enabled below then selects which flavor.
+  tui_keymaps = false,
+  -- Scroll behaviour in terminal mode. Only consulted when tui_keymaps is true.
+  -- false (default): <ScrollWheelUp>/k/<Up> forward guarded scroll events to the Claude Code
+  --   TUI so it scrolls its own conversation.
   -- true: <ScrollWheelUp> exits terminal mode so you can view Neovim's scrollback buffer.
   --   <ScrollWheelDown> in normal mode auto-returns to terminal mode at the last line.
   scroll_up_enabled = false,
-  -- Split navigation: Ctrl+h/j/k/l to move between splits from terminal mode
-  split_navigation = true,
+  -- Split navigation: Ctrl+h/j/k/l to move between splits from terminal mode.
+  -- false (default): no split-navigation keymaps are installed (upstream behaviour).
+  split_navigation = false,
   -- Terminal keymaps
   keymaps = {
-    exit_terminal = "<Esc><Esc>", -- Triple-ESC to exit terminal mode (set to false to disable)
+    -- Triple-ESC to exit terminal mode. false (default): no ESC keymap is installed
+    -- (upstream behaviour; use Neovim's own <C-\><C-n> to leave terminal mode).
+    -- Set to a string (e.g. "<Esc><Esc>") to bind that as a direct exit keymap.
+    exit_terminal = false,
   },
-  -- Smart ESC handling: timeout in ms to count up to three ESC presses before sending ESC to terminal
-  -- Set to nil or 0 to disable smart ESC handling (use simple keymap instead)
-  esc_timeout = 200,
+  -- Smart ESC handling: timeout in ms to count up to three ESC presses before sending ESC to
+  -- terminal. 0 (default): disabled, no ESC interception (upstream behaviour). Set > 0 to
+  -- opt in to triple-ESC-to-exit handling.
+  esc_timeout = 0,
   -- Process cleanup strategy when Neovim exits
   -- "pkill_children" - Kill child processes first, then shell (recommended, fixes race condition)
   -- "jobstop_only"   - Only use Neovim's jobstop (relies on shell forwarding SIGTERM)
@@ -371,11 +381,6 @@ function M.setup_terminal_keymaps(bufnr, config)
   local timeout = config.esc_timeout
   local exit_key = config.keymaps and config.keymaps.exit_terminal
 
-  if exit_key == false then
-    -- ESC handling disabled
-    return
-  end
-
   if timeout and timeout > 0 then
     -- Smart ESC handling: intercept single ESC
     local handler = M.create_smart_esc_handler(bufnr, timeout)
@@ -437,6 +442,13 @@ end
 ---@param config ClaudeCodeTerminalConfig Terminal configuration
 function M.setup_scroll_keymaps(bufnr, config)
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+
+  -- Opt-in gate (D2): none of the remaps below are installed unless the user
+  -- explicitly turns on terminal.tui_keymaps. Default is upstream behavior:
+  -- Neovim forwards wheel/keyboard events to the terminal job untouched.
+  if not config.tui_keymaps then
     return
   end
 
@@ -1000,6 +1012,8 @@ local function build_config(opts_override)
     keymaps = effective_config.keymaps,
     esc_timeout = effective_config.esc_timeout,
     split_navigation = effective_config.split_navigation,
+    tui_keymaps = effective_config.tui_keymaps,
+    scroll_up_enabled = effective_config.scroll_up_enabled,
   }
 end
 
@@ -1477,6 +1491,24 @@ function M.setup(user_term_config, p_terminal_cmd, p_env)
       else
         vim.notify(
           "claudecode.terminal.setup: Invalid value for split_navigation: " .. tostring(v) .. ". Must be a boolean.",
+          vim.log.levels.WARN
+        )
+      end
+    elseif k == "tui_keymaps" then
+      if type(v) == "boolean" then
+        defaults.tui_keymaps = v
+      else
+        vim.notify(
+          "claudecode.terminal.setup: Invalid value for tui_keymaps: " .. tostring(v) .. ". Must be a boolean.",
+          vim.log.levels.WARN
+        )
+      end
+    elseif k == "scroll_up_enabled" then
+      if type(v) == "boolean" then
+        defaults.scroll_up_enabled = v
+      else
+        vim.notify(
+          "claudecode.terminal.setup: Invalid value for scroll_up_enabled: " .. tostring(v) .. ". Must be a boolean.",
           vim.log.levels.WARN
         )
       end
