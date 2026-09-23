@@ -150,14 +150,7 @@ end
 
 function M.close()
   if is_valid() then
-    -- Kill child processes first (Fix 2: same pattern as native/snacks)
-    -- Shell wrappers like fish don't forward SIGTERM to child processes
-    local pid_ok, pid = pcall(vim.fn.jobpid, jobid)
-    if pid_ok and pid and pid > 0 then
-      pcall(vim.fn.system, "pkill -TERM -P " .. pid .. " 2>/dev/null")
-    end
-    -- Then stop the job gracefully
-    vim.fn.jobstop(jobid)
+    require("claudecode.terminal.process_cleanup").stop(jobid, config and config.cleanup_strategy)
     cleanup_state()
   end
 end

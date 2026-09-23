@@ -7,11 +7,13 @@ describe("terminal cleanup_all", function()
 
   -- Track calls to vim functions
   local jobstop_calls = {}
+  local jobstart_calls = {}
   local system_calls = {}
 
   before_each(function()
     -- Reset call tracking
     jobstop_calls = {}
+    jobstart_calls = {}
     system_calls = {}
 
     -- Mock vim global
@@ -41,12 +43,25 @@ describe("terminal cleanup_all", function()
         end,
       },
       fn = {
+        has = function(feature)
+          if feature == "win32" then
+            return 0
+          end
+          return 0
+        end,
         jobpid = function(job_id)
           -- Return a predictable PID based on job_id
           return job_id * 100
         end,
         jobstop = function(job_id)
           table.insert(jobstop_calls, job_id)
+          return 1
+        end,
+        -- Async, non-blocking process cleanup runs pkill scripts through
+        -- jobstart({"sh", "-c", script}, {detach = true}); it must never
+        -- reach vim.fn.system (that would block the UI).
+        jobstart = function(cmd, opts)
+          table.insert(jobstart_calls, { cmd = cmd, opts = opts })
           return 1
         end,
         system = function(cmd)
@@ -158,6 +173,18 @@ describe("terminal cleanup_all", function()
     assert.are.same({}, opened)
   end)
 
+  ---Concatenates the shell scripts passed to jobstart({"sh", "-c", script}, ...)
+  ---so tests can pattern-match the pkill/kill commands inside them.
+  local function jobstart_scripts()
+    local scripts = {}
+    for _, call in ipairs(jobstart_calls) do
+      if type(call.cmd) == "table" and call.cmd[1] == "sh" and call.cmd[2] == "-c" then
+        table.insert(scripts, call.cmd[3])
+      end
+    end
+    return table.concat(scripts, "\n")
+  end
+
   it("should kill tracked PIDs", function()
     -- Track a PID
     terminal.track_terminal_pid(42)
@@ -167,18 +194,16 @@ describe("terminal cleanup_all", function()
     -- Should have called jobstop with the job_id
     assert.are.same({ 42 }, jobstop_calls)
 
-    -- Should have called system with pkill command using the PID (42 * 100 = 4200)
-    assert.is_true(#system_calls >= 1)
-    local found_pkill = false
-    for _, cmd in ipairs(system_calls) do
-      if cmd:match("pkill %-TERM %-P 4200") then
-        found_pkill = true
-      end
-    end
-    assert.is_true(found_pkill, "Expected pkill -TERM -P 4200 command")
+    -- Cleanup must run through jobstart (detached), never vim.fn.system.
+    assert.are.same({}, system_calls)
+    assert.are.equal(1, #jobstart_calls)
+    assert.are.same({ detach = true }, jobstart_calls[1].opts)
+
+    -- Should have a pkill command for the PID (42 * 100 = 4200)
+    assert.truthy(jobstart_scripts():match("pkill %-TERM %-P 4200"), "Expected pkill -TERM -P 4200 command")
   end)
 
-  it("should kill multiple tracked PIDs", function()
+  it("should kill multiple tracked PIDs in a single detached job", function()
     -- Track multiple PIDs
     terminal.track_terminal_pid(100)
     terminal.track_terminal_pid(200)
@@ -189,18 +214,16 @@ describe("terminal cleanup_all", function()
     -- Should have called jobstop for all jobs
     assert.are.equal(3, #jobstop_calls)
 
+    -- Never blocks: exactly one detached jobstart call for the whole batch.
+    assert.are.same({}, system_calls)
+    assert.are.equal(1, #jobstart_calls)
+    assert.are.same({ detach = true }, jobstart_calls[1].opts)
+
     -- Should have pkill commands for all PIDs (100*100=10000, 200*100=20000, 300*100=30000)
-    local found_pids = { [10000] = false, [20000] = false, [30000] = false }
-    for _, cmd in ipairs(system_calls) do
-      for pid, _ in pairs(found_pids) do
-        if cmd:match("pkill %-TERM %-P " .. pid) then
-          found_pids[pid] = true
-        end
-      end
-    end
-    assert.is_true(found_pids[10000], "Expected pkill for PID 10000")
-    assert.is_true(found_pids[20000], "Expected pkill for PID 20000")
-    assert.is_true(found_pids[30000], "Expected pkill for PID 30000")
+    local script = jobstart_scripts()
+    assert.truthy(script:match("pkill %-TERM %-P 10000"), "Expected pkill for PID 10000")
+    assert.truthy(script:match("pkill %-TERM %-P 20000"), "Expected pkill for PID 20000")
+    assert.truthy(script:match("pkill %-TERM %-P 30000"), "Expected pkill for PID 30000")
   end)
 
   it("should untrack PIDs when terminal exits normally", function()
@@ -285,17 +308,11 @@ describe("terminal cleanup_all", function()
 
       -- Should have recovered and killed both PIDs (100*100=10000, 200*100=20000)
       assert.are.equal(2, #jobstop_calls)
+      assert.are.same({}, system_calls)
 
-      local found_pids = { [10000] = false, [20000] = false }
-      for _, cmd in ipairs(system_calls) do
-        for pid, _ in pairs(found_pids) do
-          if cmd:match("pkill %-TERM %-P " .. pid) then
-            found_pids[pid] = true
-          end
-        end
-      end
-      assert.is_true(found_pids[10000], "Expected pkill for recovered PID 10000")
-      assert.is_true(found_pids[20000], "Expected pkill for recovered PID 20000")
+      local script = jobstart_scripts()
+      assert.truthy(script:match("pkill %-TERM %-P 10000"), "Expected pkill for recovered PID 10000")
+      assert.truthy(script:match("pkill %-TERM %-P 20000"), "Expected pkill for recovered PID 20000")
     end)
 
     it("should recover PIDs from terminal buffers", function()
@@ -340,17 +357,11 @@ describe("terminal cleanup_all", function()
 
       -- Should have recovered PIDs from terminal buffers (300*100=30000, 400*100=40000)
       assert.are.equal(2, #jobstop_calls)
+      assert.are.same({}, system_calls)
 
-      local found_pids = { [30000] = false, [40000] = false }
-      for _, cmd in ipairs(system_calls) do
-        for pid, _ in pairs(found_pids) do
-          if cmd:match("pkill %-TERM %-P " .. pid) then
-            found_pids[pid] = true
-          end
-        end
-      end
-      assert.is_true(found_pids[30000], "Expected pkill for recovered PID 30000")
-      assert.is_true(found_pids[40000], "Expected pkill for recovered PID 40000")
+      local script = jobstart_scripts()
+      assert.truthy(script:match("pkill %-TERM %-P 30000"), "Expected pkill for recovered PID 30000")
+      assert.truthy(script:match("pkill %-TERM %-P 40000"), "Expected pkill for recovered PID 40000")
     end)
 
     it("should handle mixed tracked and recovered PIDs", function()
@@ -394,18 +405,12 @@ describe("terminal cleanup_all", function()
       -- - 100 (from session) -> PID 10000
       -- - 200 (from buffer) -> PID 20000
       assert.are.equal(3, #jobstop_calls)
+      assert.are.same({}, system_calls)
 
-      local found_pids = { [4200] = false, [10000] = false, [20000] = false }
-      for _, cmd in ipairs(system_calls) do
-        for pid, _ in pairs(found_pids) do
-          if cmd:match("pkill %-TERM %-P " .. pid) then
-            found_pids[pid] = true
-          end
-        end
-      end
-      assert.is_true(found_pids[4200], "Expected pkill for tracked PID 4200")
-      assert.is_true(found_pids[10000], "Expected pkill for session PID 10000")
-      assert.is_true(found_pids[20000], "Expected pkill for buffer PID 20000")
+      local script = jobstart_scripts()
+      assert.truthy(script:match("pkill %-TERM %-P 4200"), "Expected pkill for tracked PID 4200")
+      assert.truthy(script:match("pkill %-TERM %-P 10000"), "Expected pkill for session PID 10000")
+      assert.truthy(script:match("pkill %-TERM %-P 20000"), "Expected pkill for buffer PID 20000")
     end)
 
     it("should not duplicate PIDs already tracked", function()

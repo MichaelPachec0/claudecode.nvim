@@ -20,25 +20,27 @@ local tracked_pids = _G._claudecode_tracked_pids
 _G._claudecode_buffer_to_session = _G._claudecode_buffer_to_session or {}
 local buffer_to_session = _G._claudecode_buffer_to_session
 
----Cleanup orphaned PIDs from previous module load (Fix 3: Plugin Reload Protection)
----Called on module load to kill any processes that were orphaned by a plugin reload
-local function cleanup_orphaned_pids()
+---Cleanup orphaned PIDs from a previous module load (Fix 3: Plugin Reload
+---Protection). Called from M.setup() (not at module load: this module must
+---have no side effects at require time) to kill any processes orphaned by a
+---plugin reload. Runs through process_cleanup so it never blocks the UI.
+---@param strategy string|nil The configured cleanup_strategy (D3 default: "pkill_children")
+local function cleanup_orphaned_pids(strategy)
+  local process_cleanup = require("claudecode.terminal.process_cleanup")
+  local entries = {}
   for job_id, pid in pairs(tracked_pids) do
     -- Check if job still exists
     local exists = pcall(vim.fn.jobpid, job_id)
     if not exists then
       -- Job doesn't exist but PID tracked - orphaned
-      if pid and pid > 0 then
-        pcall(vim.fn.system, "pkill -TERM -P " .. pid .. " 2>/dev/null")
-        pcall(vim.fn.system, "kill -TERM " .. pid .. " 2>/dev/null")
-      end
+      table.insert(entries, { job_id = job_id, pid = pid })
       tracked_pids[job_id] = nil
     end
   end
+  if #entries > 0 then
+    process_cleanup.stop_many(entries, strategy)
+  end
 end
-
--- Run cleanup on module load
-cleanup_orphaned_pids()
 
 ---Track a terminal job's PID for cleanup on exit
 ---@param job_id number The Neovim job ID
@@ -1449,6 +1451,11 @@ function M.setup(user_term_config, p_terminal_cmd, p_env)
 
   setup_buffer_cleanup_autocmd()
 
+  -- Kill any processes orphaned by a previous module load (Fix 3: Plugin
+  -- Reload Protection). Deferred to setup() so this module has no side
+  -- effects at require time.
+  cleanup_orphaned_pids(defaults.cleanup_strategy)
+
   -- Setup window manager with config
   local window_manager = require("claudecode.terminal.window_manager")
   window_manager.setup({
@@ -2080,83 +2087,23 @@ function M.cleanup_all()
     end
   end
 
-  -- Collect PIDs and job IDs first (don't stop jobs yet - that's the race condition!)
-  local pids_to_kill = {}
-  local job_ids_to_stop = {}
-
+  -- Collect job_id/pid entries first (don't stop jobs yet - that's the race condition!)
+  local entries = {}
+  local pid_count = 0
   for job_id, pid in pairs(tracked_pids) do
+    table.insert(entries, { job_id = job_id, pid = pid })
     if pid and pid > 0 then
-      table.insert(pids_to_kill, pid)
+      pid_count = pid_count + 1
     end
-    table.insert(job_ids_to_stop, job_id)
   end
 
-  logger.debug("terminal", "cleanup_all: strategy=" .. strategy .. ", found " .. #pids_to_kill .. " PIDs")
+  logger.debug("terminal", "cleanup_all: strategy=" .. strategy .. ", found " .. pid_count .. " PIDs")
 
-  -- Handle "none" strategy - don't kill anything
-  if strategy == "none" then
-    logger.debug("terminal", "cleanup_all: strategy=none, skipping process cleanup")
-    -- Clear tracking but don't kill
-    tracked_pids = {}
-    _G._claudecode_tracked_pids = tracked_pids
-    return
-  end
-
-  -- For pkill_children strategy: kill children FIRST to fix race condition
-  -- This must happen BEFORE jobstop(), otherwise the shell is killed before children
-  if strategy == "pkill_children" and #pids_to_kill > 0 then
-    local kill_cmds = {}
-    for _, pid in ipairs(pids_to_kill) do
-      -- Kill the entire process tree recursively, not just direct children
-      -- 1. First, try to kill by process group (catches all descendants)
-      table.insert(kill_cmds, "kill -TERM -" .. pid .. " 2>/dev/null")
-      -- 2. Kill direct children
-      table.insert(kill_cmds, "pkill -TERM -P " .. pid .. " 2>/dev/null")
-      -- 3. Kill the shell process itself
-      table.insert(kill_cmds, "kill -TERM " .. pid .. " 2>/dev/null")
-    end
-    local cmd = table.concat(kill_cmds, "; ") .. "; true"
-
-    vim.fn.system(cmd)
-
-    -- Give processes time to die gracefully
-    vim.fn.system("sleep 0.1")
-
-    -- Second pass: kill any survivors with SIGKILL
-    local kill9_cmds = {}
-    for _, pid in ipairs(pids_to_kill) do
-      -- Kill entire process group with SIGKILL
-      table.insert(kill9_cmds, "kill -KILL -" .. pid .. " 2>/dev/null")
-      -- Kill remaining children with SIGKILL
-      table.insert(kill9_cmds, "pkill -KILL -P " .. pid .. " 2>/dev/null")
-      -- Kill the process itself with SIGKILL
-      table.insert(kill9_cmds, "kill -KILL " .. pid .. " 2>/dev/null")
-    end
-    local cmd9 = table.concat(kill9_cmds, "; ") .. "; true"
-
-    vim.fn.system(cmd9)
-    logger.debug("terminal", "cleanup_all: killed process trees of PIDs: " .. table.concat(pids_to_kill, ", "))
-  end
-
-  -- For aggressive strategy: use SIGKILL for guaranteed termination
-  if strategy == "aggressive" and #pids_to_kill > 0 then
-    local kill_cmds = {}
-    for _, pid in ipairs(pids_to_kill) do
-      -- Kill children with SIGKILL
-      table.insert(kill_cmds, "pkill -KILL -P " .. pid)
-      -- Kill the process itself with SIGKILL
-      table.insert(kill_cmds, "kill -KILL " .. pid)
-    end
-    local cmd = table.concat(kill_cmds, "; ") .. "; true"
-
-    vim.fn.system(cmd)
-    logger.debug("terminal", "cleanup_all: aggressively killed PIDs: " .. table.concat(pids_to_kill, ", "))
-  end
-
-  -- Stop jobs via Neovim API (all strategies except "none")
-  for _, job_id in ipairs(job_ids_to_stop) do
-    pcall(vim.fn.jobstop, job_id)
-  end
+  -- Runs at most one detached shell job for the whole batch (never blocks the
+  -- UI), then jobstops each Neovim job. See process_cleanup for per-strategy
+  -- signal semantics ("none" skips everything, including jobstop).
+  local process_cleanup = require("claudecode.terminal.process_cleanup")
+  process_cleanup.stop_many(entries, strategy)
 
   -- Clear tracked PIDs (update both local and global)
   tracked_pids = {}

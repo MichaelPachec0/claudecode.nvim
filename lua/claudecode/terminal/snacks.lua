@@ -10,6 +10,12 @@ local osc_handler = require("claudecode.terminal.osc_handler")
 local session_manager = require("claudecode.session")
 local utils = require("claudecode.utils")
 
+---Module-level fallback config, used by call sites (e.g. close_session) that
+---have no effective_config of their own in scope. Function parameters named
+---`config`/`effective_config` shadow this within their own function bodies.
+---@type ClaudeCodeTerminalConfig
+local default_config = require("claudecode.terminal").defaults
+
 -- Legacy single terminal support (backward compatibility)
 local terminal = nil
 
@@ -391,13 +397,7 @@ local function create_terminal_buffer(cmd_string, env_table, config, session_id)
         callback = function()
           local unload_ok, unload_job_id = pcall(vim.api.nvim_buf_get_var, term_instance.buf, "terminal_job_id")
           if unload_ok and unload_job_id then
-            -- Get Unix PID from Neovim job ID
-            local pid_ok, pid = pcall(vim.fn.jobpid, unload_job_id)
-            if pid_ok and pid and pid > 0 then
-              -- Kill child processes first (shell wrappers like fish don't forward SIGTERM)
-              pcall(vim.fn.system, "pkill -TERM -P " .. pid .. " 2>/dev/null")
-            end
-            pcall(vim.fn.jobstop, unload_job_id)
+            require("claudecode.terminal.process_cleanup").stop(unload_job_id, config.cleanup_strategy)
           end
         end,
       })
@@ -707,14 +707,7 @@ function M.close_session(session_id)
     if term_instance.buf then
       local ok, job_id = pcall(vim.api.nvim_buf_get_var, term_instance.buf, "terminal_job_id")
       if ok and job_id then
-        -- Get Unix PID from Neovim job ID
-        local pid_ok, pid = pcall(vim.fn.jobpid, job_id)
-        if pid_ok and pid and pid > 0 then
-          -- Kill child processes first (shell wrappers like fish don't forward SIGTERM)
-          pcall(vim.fn.system, "pkill -TERM -P " .. pid .. " 2>/dev/null")
-        end
-        -- Then kill the shell process
-        pcall(vim.fn.jobstop, job_id)
+        require("claudecode.terminal.process_cleanup").stop(job_id, default_config.cleanup_strategy)
       end
     end
 
@@ -804,18 +797,11 @@ function M.close_session_keep_window(old_session_id, new_session_id, effective_c
   end
 
   -- Stop the old job first to ensure the process is terminated
-  -- Kill child processes first (shell wrappers like fish don't forward SIGTERM)
   if old_term and old_term:buf_valid() and old_term.buf then
     local ok, job_id = pcall(vim.api.nvim_buf_get_var, old_term.buf, "terminal_job_id")
     if ok and job_id then
-      -- Get Unix PID from Neovim job ID
-      local pid_ok, pid = pcall(vim.fn.jobpid, job_id)
-      if pid_ok and pid and pid > 0 then
-        -- Kill child processes first (e.g., claude spawned by fish)
-        pcall(vim.fn.system, "pkill -TERM -P " .. pid .. " 2>/dev/null")
-      end
-      -- Then kill the shell process
-      pcall(vim.fn.jobstop, job_id)
+      local strategy = (effective_config and effective_config.cleanup_strategy) or default_config.cleanup_strategy
+      require("claudecode.terminal.process_cleanup").stop(job_id, strategy)
     end
   end
 

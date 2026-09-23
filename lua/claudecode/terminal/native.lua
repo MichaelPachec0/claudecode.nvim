@@ -86,13 +86,7 @@ local function create_terminal_buffer(cmd_string, env_table, effective_config, s
       -- Get job ID from buffer variable (set by termopen)
       local ok, job_id = pcall(vim.api.nvim_buf_get_var, new_bufnr, "terminal_job_id")
       if ok and job_id then
-        -- Get Unix PID from Neovim job ID
-        local pid_ok, pid = pcall(vim.fn.jobpid, job_id)
-        if pid_ok and pid and pid > 0 then
-          -- Kill child processes first (shell wrappers like fish don't forward SIGTERM)
-          pcall(vim.fn.system, "pkill -TERM -P " .. pid .. " 2>/dev/null")
-        end
-        pcall(vim.fn.jobstop, job_id)
+        require("claudecode.terminal.process_cleanup").stop(job_id, config.cleanup_strategy)
       end
     end,
   })
@@ -329,7 +323,7 @@ function M.close()
   local active_jobid = (active_state and active_state.jobid) or jobid
 
   if active_jobid then
-    pcall(vim.fn.jobstop, active_jobid)
+    require("claudecode.terminal.process_cleanup").stop(active_jobid, config.cleanup_strategy)
   end
 
   window_manager.close_window()
@@ -532,14 +526,7 @@ function M.close_session(session_id)
 
   -- Stop the job first to ensure the process is terminated
   if state.jobid then
-    -- Get Unix PID from Neovim job ID
-    local pid_ok, pid = pcall(vim.fn.jobpid, state.jobid)
-    if pid_ok and pid and pid > 0 then
-      -- Kill child processes first (shell wrappers like fish don't forward SIGTERM)
-      pcall(vim.fn.system, "pkill -TERM -P " .. pid .. " 2>/dev/null")
-    end
-    -- Then kill the shell process
-    pcall(vim.fn.jobstop, state.jobid)
+    require("claudecode.terminal.process_cleanup").stop(state.jobid, config.cleanup_strategy)
   end
 
   -- Clean up the buffer if it exists
@@ -627,14 +614,7 @@ function M.close_session_keep_window(old_session_id, new_session_id, effective_c
 
   -- Stop the old job first to ensure the process is terminated
   if old_state and old_state.jobid then
-    -- Get Unix PID from Neovim job ID
-    local pid_ok, pid = pcall(vim.fn.jobpid, old_state.jobid)
-    if pid_ok and pid and pid > 0 then
-      -- Kill child processes first (shell wrappers like fish don't forward SIGTERM)
-      pcall(vim.fn.system, "pkill -TERM -P " .. pid .. " 2>/dev/null")
-    end
-    -- Then kill the shell process
-    pcall(vim.fn.jobstop, old_state.jobid)
+    require("claudecode.terminal.process_cleanup").stop(old_state.jobid, config.cleanup_strategy)
   end
 
   -- Clean up old terminal's buffer
