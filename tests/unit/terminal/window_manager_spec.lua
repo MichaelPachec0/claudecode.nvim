@@ -152,6 +152,84 @@ describe("claudecode.terminal.window_manager", function()
     end)
   end)
 
+  describe("ensure_window buffer ownership", function()
+    it("does not claim a user's unrelated terminal window", function()
+      mock_vim.api.nvim_get_current_tabpage = spy.new(function()
+        return 1
+      end)
+      local other_terminal_win = 2000
+      mock_vim.api.nvim_tabpage_list_wins = spy.new(function()
+        return { other_terminal_win }
+      end)
+      mock_vim.api.nvim_win_is_valid = spy.new(function()
+        return true
+      end)
+      mock_vim.api.nvim_win_get_buf = spy.new(function()
+        return 1
+      end)
+      -- Plain :terminal buffer: buftype is "terminal" but no claudecode flag
+      mock_vim.bo = setmetatable({}, {
+        __index = function()
+          return { buftype = "terminal", channel = 123 }
+        end,
+      })
+      mock_vim.b = setmetatable({}, {
+        __index = function()
+          return {}
+        end,
+      })
+
+      -- The fallback path creates a fresh split window
+      mock_vim.o = { columns = 200 }
+      mock_vim.wo = setmetatable({}, {
+        __index = function()
+          return {}
+        end,
+        __newindex = function() end,
+      })
+      mock_vim.cmd = spy.new(function() end)
+      mock_vim.api.nvim_win_set_width = spy.new(function() end)
+      mock_vim.api.nvim_get_current_win = spy.new(function()
+        return 1000
+      end)
+
+      window_manager.setup({})
+
+      local win = window_manager.ensure_window()
+      assert.are_not.equal(other_terminal_win, win)
+    end)
+
+    it("claims a window showing a Claude terminal buffer", function()
+      mock_vim.api.nvim_get_current_tabpage = spy.new(function()
+        return 1
+      end)
+      local claude_win = 2000
+      mock_vim.api.nvim_tabpage_list_wins = spy.new(function()
+        return { claude_win }
+      end)
+      mock_vim.api.nvim_win_is_valid = spy.new(function()
+        return true
+      end)
+      mock_vim.api.nvim_win_get_buf = spy.new(function()
+        return 1
+      end)
+      mock_vim.bo = setmetatable({}, {
+        __index = function()
+          return { buftype = "terminal", channel = 123 }
+        end,
+      })
+      mock_vim.b = setmetatable({}, {
+        __index = function()
+          return { claudecode_terminal = true }
+        end,
+      })
+
+      window_manager.setup({})
+
+      assert.are.equal(claude_win, window_manager.ensure_window())
+    end)
+  end)
+
   describe("notify_resize", function()
     it("should be a no-op when no terminal window exists", function()
       window_manager.setup({})
@@ -356,6 +434,11 @@ describe("claudecode.terminal.window_manager", function()
           return { buftype = "terminal", channel = 123 }
         end,
       })
+      mock_vim.b = setmetatable({}, {
+        __index = function()
+          return { claudecode_terminal = true }
+        end,
+      })
       mock_vim.api.nvim_win_is_valid = spy.new(function()
         return true
       end)
@@ -405,6 +488,11 @@ describe("claudecode.terminal.window_manager", function()
           return { buftype = "terminal", channel = 123 }
         end,
       })
+      mock_vim.b = setmetatable({}, {
+        __index = function()
+          return { claudecode_terminal = true }
+        end,
+      })
       -- The user is in a non-terminal window (1000)
       mock_vim.api.nvim_get_current_win = spy.new(function()
         return 1000
@@ -449,6 +537,11 @@ describe("claudecode.terminal.window_manager", function()
       mock_vim.bo = setmetatable({}, {
         __index = function()
           return { buftype = "terminal", channel = 123 }
+        end,
+      })
+      mock_vim.b = setmetatable({}, {
+        __index = function()
+          return { claudecode_terminal = true }
         end,
       })
       mock_vim.api.nvim_win_is_valid = spy.new(function()
@@ -576,6 +669,11 @@ describe("claudecode.terminal.window_manager", function()
           return { buftype = "terminal", channel = 123 }
         end,
       })
+      mock_vim.b = setmetatable({}, {
+        __index = function()
+          return { claudecode_terminal = true }
+        end,
+      })
 
       window_manager.setup({})
 
@@ -639,6 +737,11 @@ describe("claudecode.terminal.window_manager", function()
           return { buftype = "terminal", channel = 123 }
         end,
       })
+      mock_vim.b = setmetatable({}, {
+        __index = function()
+          return { claudecode_terminal = true }
+        end,
+      })
 
       window_manager.setup({ split_width_percentage = 0.35 })
 
@@ -697,6 +800,11 @@ describe("claudecode.terminal.window_manager", function()
       mock_vim.bo = setmetatable({}, {
         __index = function(_, bufnr)
           return { buftype = "terminal", channel = 123 }
+        end,
+      })
+      mock_vim.b = setmetatable({}, {
+        __index = function()
+          return { claudecode_terminal = true }
         end,
       })
 

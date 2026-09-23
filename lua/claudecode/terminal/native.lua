@@ -55,6 +55,10 @@ local function create_terminal_buffer(cmd_string, env_table, effective_config, s
     return nil, nil
   end
 
+  -- Mark this buffer as ours so window_manager never mistakes a user's own
+  -- :terminal for a Claude terminal window.
+  vim.b[new_bufnr].claudecode_terminal = true
+
   vim.bo[new_bufnr].bufhidden = "hide"
 
   -- Set up scroll keymaps (scroll up to view scrollback by default)

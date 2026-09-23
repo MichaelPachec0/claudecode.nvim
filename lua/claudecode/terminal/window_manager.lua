@@ -22,7 +22,17 @@ local state = {
   resize_pending = false,
 }
 
----Find any existing terminal window in current tabpage
+---Check whether a buffer is a Claude Code terminal buffer we own.
+---Providers set `vim.b[bufnr].claudecode_terminal = true` on every terminal
+---buffer they create, so a user's own `:terminal` (also buftype=terminal)
+---is never mistaken for ours.
+---@param buf number
+---@return boolean
+local function is_claude_terminal_buf(buf)
+  return vim.bo[buf].buftype == "terminal" and vim.b[buf].claudecode_terminal == true
+end
+
+---Find any existing Claude terminal window in current tabpage
 ---@return number|nil winid
 local function find_terminal_window()
   local current_tab = vim.api.nvim_get_current_tabpage()
@@ -31,8 +41,7 @@ local function find_terminal_window()
   for _, win in ipairs(wins) do
     if vim.api.nvim_win_is_valid(win) then
       local buf = vim.api.nvim_win_get_buf(win)
-      local buftype = vim.bo[buf].buftype
-      if buftype == "terminal" then
+      if is_claude_terminal_buf(buf) then
         return win
       end
     end

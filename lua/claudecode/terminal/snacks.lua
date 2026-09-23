@@ -353,6 +353,12 @@ local function create_terminal_buffer(cmd_string, env_table, config, session_id)
   local term_instance = Snacks.terminal.open(cmd_string, opts)
 
   if term_instance and term_instance:buf_valid() then
+    -- Mark this buffer as ours so window_manager never mistakes a user's own
+    -- :terminal for a Claude terminal window.
+    if term_instance.buf then
+      vim.b[term_instance.buf].claudecode_terminal = true
+    end
+
     -- Immediately close snacks' window (buffer stays alive)
     -- We'll display the buffer in window_manager's window instead
     if term_instance.win and vim.api.nvim_win_is_valid(term_instance.win) then
