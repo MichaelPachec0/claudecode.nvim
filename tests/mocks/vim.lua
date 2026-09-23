@@ -119,7 +119,15 @@ local vim = {
     end,
 
     nvim_get_current_buf = function()
-      return 1
+      -- Defaults to buffer 1; specs can switch it via nvim_set_current_buf.
+      return vim._current_buf or 1
+    end,
+
+    nvim_set_current_buf = function(bufnr)
+      vim._current_buf = bufnr
+      if vim._windows[vim._current_window] then
+        vim._windows[vim._current_window].buf = bufnr
+      end
     end,
 
     nvim_buf_get_name = function(bufnr)
@@ -1223,6 +1231,7 @@ vim._mock = {
     vim._namespaces = {}
     vim._next_ns_id = 1
     vim._highlights = {}
+    vim._current_buf = nil
   end,
 }
 
