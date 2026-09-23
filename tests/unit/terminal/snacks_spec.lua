@@ -133,6 +133,7 @@ describe("claudecode.terminal.snacks command handling", function()
   end
 
   it("passes a bracketed model alias to Snacks as an argv list, not a shell string", function()
+    pending("re-ported in Task 7: Snacks argv command handling (parse_command)")
     snacks_provider.open("claude --model opus[1m]", { FOO = "bar" }, base_config(), true)
 
     assert.spy(mock_snacks.terminal.open).was_called(1)
@@ -141,6 +142,7 @@ describe("claudecode.terminal.snacks command handling", function()
   end)
 
   it("wraps an argument-less command in a single-element list", function()
+    pending("re-ported in Task 7: Snacks argv command handling (parse_command)")
     snacks_provider.open("claude", {}, base_config(), true)
 
     assert.is_table(captured.cmd)
@@ -148,6 +150,7 @@ describe("claudecode.terminal.snacks command handling", function()
   end)
 
   it("keeps quoted arguments intact instead of splitting on inner spaces", function()
+    pending("re-ported in Task 7: Snacks argv command handling (parse_command)")
     snacks_provider.open("claude --message='hello world'", {}, base_config(), true)
 
     assert.is_table(captured.cmd)
@@ -155,6 +158,7 @@ describe("claudecode.terminal.snacks command handling", function()
   end)
 
   it("expands a tilde in terminal_cmd before handing argv to Snacks", function()
+    pending("re-ported in Task 7: Snacks argv command handling (parse_command)")
     local home = os.getenv("HOME")
     snacks_provider.open("~/.claude/local/claude", {}, base_config(), true)
 

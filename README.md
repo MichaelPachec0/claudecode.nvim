@@ -1,6 +1,6 @@
 # claudecode.nvim
 
-[![Tests](https://github.com/coder/claudecode.nvim/actions/workflows/test.yml/badge.svg)](https://github.com/coder/claudecode.nvim/actions/workflows/test.yml)
+[![Tests](https://github.com/snirt/claudecode.nvim/actions/workflows/test.yml/badge.svg)](https://github.com/snirt/claudecode.nvim/actions/workflows/test.yml)
 ![Neovim version](https://img.shields.io/badge/Neovim-0.8%2B-green)
 ![Status](https://img.shields.io/badge/Status-beta-blue)
 
@@ -20,11 +20,104 @@ When Anthropic released Claude Code, they only supported VS Code and JetBrains. 
 - ⚡ **First to Market** — Beat Anthropic to releasing Neovim support
 - 🛠️ **Built with AI** — Used Claude to reverse-engineer Claude's own protocol
 
+## Fork Features
+
+This fork adds features not available in the original [coder/claudecode.nvim](https://github.com/coder/claudecode.nvim):
+
+### Multi-Session Support
+
+Run multiple Claude Code sessions simultaneously, each with isolated state:
+
+- **Independent sessions** — Each session has its own terminal, WebSocket connection, and context
+- **Easy switching** — Use `:ClaudeCodeSessions` for a picker or `:ClaudeCodeSwitch 2` to switch directly
+- **Session lifecycle** — Create with `:ClaudeCodeNew`, close with `:ClaudeCodeCloseSession`
+
+Perfect for working on multiple features, comparing approaches, or keeping separate contexts for different parts of a project.
+
+### Visual Tab Bar
+
+A clickable tab bar for managing sessions visually:
+
+```
+┌─────────────────────────────────────────────────────┐
+│ [1*] ✕ | [2] ✕ | [3] ✕ | [+]                       │
+├─────────────────────────────────────────────────────┤
+│                                                     │
+│              Claude Code Terminal                   │
+│                                                     │
+└─────────────────────────────────────────────────────┘
+```
+
+- **Mouse support** — Click tabs to switch, click ✕ to close, click + for new session
+- **Keyboard navigation** — `Alt+Tab` / `Alt+Shift+Tab` to cycle sessions
+- **Active indicator** — Current session marked with `*`
+
+Enable with:
+
+```lua
+terminal = {
+  tabs = {
+    enabled = true,
+    mouse_enabled = true,
+  },
+}
+```
+
+### Triple-ESC in Terminal Mode
+
+Three-state ESC handler for the Claude terminal:
+
+- **1× ESC** — forwarded to Claude (cancel current input/operation)
+- **2× ESC** — forwarded as `<ESC><ESC>` (Claude rewind to previous prompt)
+- **3× ESC** — exit Neovim terminal-mode
+
+> **Migration note:** Upstream uses double-ESC to exit terminal-mode. In this fork, double-ESC is reserved for Claude's rewind. Use triple-ESC to exit.
+
+### TUI Scroll-Back
+
+Scroll the Claude TUI buffer without leaving terminal-mode:
+
+- Mouse wheel and `PageUp` / `PageDown` route to Claude's internal scroll
+- Over-scroll guard keeps you inside terminal-mode at the buffer edges
+
+### Split Navigation with Mode Restore
+
+`<C-w>h/j/k/l` from a Claude terminal jumps to neighbor splits and restores the prior mode (terminal vs normal) when you return. Selection tracking follows window focus so file references stay accurate.
+
+### Robust Process Cleanup
+
+- Orphan Claude processes are killed when Neovim exits
+- Terminal split width is preserved across tab switches and session operations
+- Floating-terminal focus is retained when diffs open
+
+### Server Hooks
+
+- `on_disconnect_cleanup` callback on the TCP server for custom teardown
+- Quieter logs for expected disconnect errors
+- IDE diagnostics tolerate documents without a URI scheme
+
+### Tab Bar Configuration Keys
+
+```lua
+terminal = {
+  tabs = {
+    enabled = false,           -- visual tab bar
+    height = 1,                -- tab bar rows
+    mouse_enabled = false,     -- click to switch/close/new
+    show_close_button = true,  -- ✕ on each tab
+    show_new_button = true,    -- + tab to spawn session
+    separator = " | ",
+    active_indicator = "*",
+    keymaps = {},              -- override Alt+Tab cycle bindings
+  },
+}
+```
+
 ## Installation
 
 ```lua
 {
-  "coder/claudecode.nvim",
+  "snirt/claudecode.nvim",
   dependencies = { "folke/snacks.nvim" },
   config = true,
   -- `cmd` lets lazy.nvim create command stubs that load the plugin on first use,
@@ -66,6 +159,9 @@ When Anthropic released Claude Code, they only supported VS Code and JetBrains. 
     -- Diff management
     { "<leader>aa", "<cmd>ClaudeCodeDiffAccept<cr>", desc = "Accept diff" },
     { "<leader>ad", "<cmd>ClaudeCodeDiffDeny<cr>", desc = "Deny diff" },
+    -- Multi-session management
+    { "<leader>an", "<cmd>ClaudeCodeNew<cr>", desc = "New Claude session" },
+    { "<leader>al", "<cmd>ClaudeCodeSessions<cr>", desc = "List Claude sessions" },
   },
 }
 ```
@@ -117,7 +213,7 @@ If you have a local installation, configure the plugin with the direct path:
 
 ```lua
 {
-  "coder/claudecode.nvim",
+  "snirt/claudecode.nvim",
   dependencies = { "folke/snacks.nvim" },
   opts = {
     terminal_cmd = "~/.claude/local/claude", -- Point to local installation
@@ -176,7 +272,7 @@ Configure the plugin with the detected path:
 
 ```lua
 {
-  "coder/claudecode.nvim",
+  "snirt/claudecode.nvim",
   dependencies = { "folke/snacks.nvim" },
   opts = {
     terminal_cmd = "/path/to/your/claude", -- Use output from 'which claude'
@@ -193,6 +289,52 @@ Configure the plugin with the detected path:
 </details>
 
 > **Note**: If Claude Code was installed globally via npm, you can use the default configuration without specifying `terminal_cmd`.
+
+## Recommended Configuration
+
+A practical configuration with the most useful options:
+
+```lua
+{
+  "snirt/claudecode.nvim",
+  dependencies = { "folke/snacks.nvim" },
+  opts = {
+    -- Terminal as floating window (recommended)
+    terminal = {
+      provider = "snacks",
+      split_side = "right",
+      split_width_percentage = 0.30,
+      snacks_win_opts = {
+        style = "float",
+        width = 0.8,
+        height = 0.8,
+        border = "rounded",
+      },
+      -- Tab bar for multiple sessions
+      tabs = {
+        enabled = true,
+        mouse_enabled = true,
+      },
+    },
+    -- Diff behavior
+    diff_opts = {
+      auto_close_on_accept = true,
+    },
+  },
+  keys = {
+    { "<leader>a", group = "Claude" },
+    { "<leader>ac", "<cmd>ClaudeCode<cr>", desc = "Toggle Claude" },
+    { "<leader>af", "<cmd>ClaudeCodeFocus<cr>", desc = "Focus Claude" },
+    { "<leader>as", "<cmd>ClaudeCodeSend<cr>", mode = "v", desc = "Send selection" },
+    { "<leader>as", "<cmd>ClaudeCodeTreeAdd<cr>", desc = "Add file", ft = { "NvimTree", "neo-tree", "oil", "minifiles", "netrw" } },
+    { "<leader>aa", "<cmd>ClaudeCodeDiffAccept<cr>", desc = "Accept diff" },
+    { "<leader>ad", "<cmd>ClaudeCodeDiffDeny<cr>", desc = "Deny diff" },
+    -- Multi-session
+    { "<leader>an", "<cmd>ClaudeCodeNew<cr>", desc = "New session" },
+    { "<leader>al", "<cmd>ClaudeCodeSessions<cr>", desc = "List sessions" },
+  },
+}
+```
 
 ## Quick Demo
 
@@ -246,6 +388,13 @@ terminal.send_to_terminal("draft prompt", { submit = false }) -- insert only
 
 This writes directly to the terminal's job channel, so it only works with the in-editor providers (`native`/`snacks`). The `external`/`none` providers run Claude outside Neovim, where there is no pane to write to (a warning is logged).
 
+**Multi-Session Commands:**
+
+- `:ClaudeCodeNew` - Create a new Claude terminal session
+- `:ClaudeCodeSessions` - Show session picker (fzf-lua if available)
+- `:ClaudeCodeSwitch <number>` - Switch to session by number
+- `:ClaudeCodeCloseSession [number]` - Close a session (active session if no number)
+
 ## Working with Diffs
 
 When Claude proposes changes, the plugin opens a native Neovim diff view:
@@ -294,6 +443,41 @@ vim.api.nvim_create_autocmd("User", {
 })
 ```
 
+## Multi-Session Support
+
+Run multiple Claude Code sessions simultaneously:
+
+- **Create sessions**: `:ClaudeCodeNew` opens a new terminal session
+- **Switch sessions**: Use `:ClaudeCodeSessions` to pick from a list, or `:ClaudeCodeSwitch 2` to switch directly
+- **Close sessions**: `:ClaudeCodeCloseSession` closes the active session, or `:ClaudeCodeCloseSession 2` to close a specific one
+
+Each session has isolated:
+
+- Terminal buffer and process
+- WebSocket client connection
+- Selection tracking context
+- @ mention queue
+
+### Tab Bar for Sessions
+
+Enable a visual tab bar for managing multiple sessions:
+
+```lua
+terminal = {
+  tabs = {
+    enabled = true,
+    mouse_enabled = true,  -- Click tabs to switch, middle-click to close
+  },
+}
+```
+
+The tab bar shows:
+
+- Numbered tabs for each session (active marked with `*`)
+- Close button (x) on each tab
+- New session button (+)
+- Supports keyboard navigation (Alt+Tab, Alt+Shift+Tab) and mouse interactions
+
 ## How It Works
 
 This plugin creates a WebSocket server that Claude Code CLI connects to, implementing the same protocol as the official VS Code extension. When you launch Claude, it automatically detects Neovim and gains full access to your editor.
@@ -324,7 +508,7 @@ For deep technical details, see [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ```lua
 {
-  "coder/claudecode.nvim",
+  "snirt/claudecode.nvim",
   dependencies = { "folke/snacks.nvim" },
   opts = {
     -- Server Configuration
@@ -365,6 +549,31 @@ For deep technical details, see [ARCHITECTURE.md](./ARCHITECTURE.md).
       -- the terminal, making Cmd+V appear to truncate ([#161]). true | false | "auto"
       -- ("auto", the default, enables it only on affected Neovim versions).
       fix_streamed_paste = "auto",
+
+      -- Smart ESC handling: triple-tap ESC to exit terminal mode (1x/2x forwarded to Claude)
+      esc_timeout = 200, -- Timeout in ms (0 or nil to disable smart ESC)
+
+      -- Terminal keymaps
+      keymaps = {
+        exit_terminal = "<Esc><Esc>", -- Key to exit terminal mode when smart ESC disabled (set to false to disable)
+      },
+
+      -- Tab bar for multi-session management
+      tabs = {
+        enabled = false, -- Enable tab bar (default: false)
+        height = 1, -- Height in lines
+        show_close_button = true, -- Show [x] close button on tabs
+        show_new_button = true, -- Show [+] button for new session
+        separator = " | ", -- Separator between tabs
+        active_indicator = "*", -- Indicator for active tab
+        mouse_enabled = false, -- Enable mouse clicks on tabs
+        keymaps = {
+          next_tab = "<A-Tab>", -- Switch to next session
+          prev_tab = "<A-S-Tab>", -- Switch to previous session
+          close_tab = "<A-w>", -- Close current session
+          new_tab = "<A-+>", -- Create new session
+        },
+      },
 
       -- Provider-specific options
       provider_opts = {
@@ -441,6 +650,20 @@ vim.api.nvim_create_autocmd("User", {
 > For the common "just make the terminal narrower during diffs" case you don't need
 > the events at all — set `terminal.diff_split_width_percentage` and leave
 > `auto_resize_terminal = true`.
+> **Note:** As of Claude Code's triple-ESC feature, the default terminal ESC behavior has changed:
+>
+> - **1× ESC** → forwarded to Claude Code (cancel current request)
+> - **2× ESC** → forwarded to Claude Code (rewind conversation)
+> - **3× ESC** → exits Neovim terminal mode
+>
+> To restore the previous double-ESC exit behavior, disable smart ESC:
+>
+> ```lua
+> terminal = {
+>   esc_timeout = 0,
+>   keymaps = { exit_terminal = "<Esc><Esc>" },
+> }
+> ```
 
 ### Working Directory Control
 
@@ -485,7 +708,7 @@ The `snacks_win_opts` configuration allows you to create floating Claude Code te
 local toggle_key = "<C-,>"
 return {
   {
-    "coder/claudecode.nvim",
+    "snirt/claudecode.nvim",
     dependencies = { "folke/snacks.nvim" },
     keys = {
       { toggle_key, "<cmd>ClaudeCodeFocus<cr>", desc = "Claude Code", mode = { "n", "x" } },
@@ -522,7 +745,7 @@ return {
 local toggle_key = "<M-,>"  -- Alt/Meta + comma
 return {
   {
-    "coder/claudecode.nvim",
+    "snirt/claudecode.nvim",
     dependencies = { "folke/snacks.nvim" },
     keys = {
       { toggle_key, "<cmd>ClaudeCodeFocus<cr>", desc = "Claude Code", mode = { "n", "x" } },
@@ -574,7 +797,7 @@ require("claudecode").setup({
 
 ```lua
 {
-  "coder/claudecode.nvim",
+  "snirt/claudecode.nvim",
   dependencies = { "folke/snacks.nvim" },
   keys = {
     { "<C-,>", "<cmd>ClaudeCodeFocus<cr>", desc = "Claude Code (Ctrl+,)", mode = { "n", "x" } },
@@ -649,7 +872,7 @@ You have to take care of launching CC and connecting it to the IDE yourself. (e.
 
 ```lua
 {
-  "coder/claudecode.nvim",
+  "snirt/claudecode.nvim",
   opts = {
     terminal = {
       provider = "none", -- no UI actions; server + tools remain available
@@ -671,7 +894,7 @@ Run Claude Code in a separate terminal application outside of Neovim:
 ```lua
 -- Using a string template (simple)
 {
-  "coder/claudecode.nvim",
+  "snirt/claudecode.nvim",
   opts = {
     terminal = {
       provider = "external",
@@ -685,7 +908,7 @@ Run Claude Code in a separate terminal application outside of Neovim:
 
 -- Using a function for dynamic command generation (advanced)
 {
-  "coder/claudecode.nvim",
+  "snirt/claudecode.nvim",
   opts = {
     terminal = {
       provider = "external",

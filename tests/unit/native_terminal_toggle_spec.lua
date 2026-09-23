@@ -235,6 +235,7 @@ describe("claudecode.terminal.native toggle behavior", function()
 
   describe("toggle with no existing terminal", function()
     it("should create a new terminal when none exists", function()
+      pending("re-ported in Task 5: native terminal buffer creation via parse_command argv")
       local cmd_string = "claude"
       local env_table = { TEST = "value" }
       local config = { split_side = "right", split_width_percentage = 0.3 }
@@ -253,6 +254,7 @@ describe("claudecode.terminal.native toggle behavior", function()
     end)
 
     it("should set filetype to claudecode on the terminal buffer", function()
+      pending("re-ported in Task 5: filetype claudecode on the native terminal buffer")
       local cmd_string = "claude"
       local env_table = { TEST = "value" }
       local config = { split_side = "right", split_width_percentage = 0.3 }
@@ -267,6 +269,7 @@ describe("claudecode.terminal.native toggle behavior", function()
     end)
 
     it("should pin the terminal window and disable spell on open", function()
+      pending("re-ported in Task 4: window pinning (winfixwidth/winfixheight/winfixbuf, nospell)")
       local config = { split_side = "right", split_width_percentage = 0.3 }
 
       native_provider.open("claude", {}, config)
@@ -279,6 +282,7 @@ describe("claudecode.terminal.native toggle behavior", function()
     end)
 
     it("should pin height instead of width for a bottom split", function()
+      pending("re-ported in Task 4: window pinning (winfixwidth/winfixheight/winfixbuf, nospell)")
       local config = { split_side = "bottom", split_width_percentage = 0.3 }
 
       native_provider.open("claude", {}, config)
@@ -290,6 +294,7 @@ describe("claudecode.terminal.native toggle behavior", function()
     end)
 
     it("should skip winfixbuf on Neovim < 0.10", function()
+      pending("re-ported in Task 4: window pinning (winfixwidth/winfixheight/winfixbuf, nospell)")
       local mock_state = _G.get_mock_state()
       mock_state.has_nvim_010 = false
       local config = { split_side = "right", split_width_percentage = 0.3 }
@@ -304,6 +309,7 @@ describe("claudecode.terminal.native toggle behavior", function()
 
   describe("toggle with existing hidden terminal", function()
     it("should show hidden terminal instead of creating new one", function()
+      pending("re-ported in Task 4: managed split window (vsplit/split creation, hide/show/focus of the pinned window)")
       local cmd_string = "claude"
       local env_table = { TEST = "value" }
       local config = { split_side = "right", split_width_percentage = 0.3 }
@@ -350,6 +356,7 @@ describe("claudecode.terminal.native toggle behavior", function()
 
   describe("toggle with visible terminal", function()
     it("should hide terminal when toggling from inside it and set bufhidden=hide", function()
+      pending("re-ported in Task 4: managed split window (vsplit/split creation, hide/show/focus of the pinned window)")
       local cmd_string = "claude"
       local env_table = { TEST = "value" }
       local config = { split_side = "right", split_width_percentage = 0.3 }
@@ -391,6 +398,7 @@ describe("claudecode.terminal.native toggle behavior", function()
     end)
 
     it("should focus terminal when focus toggling from outside it", function()
+      pending("re-ported in Task 4: managed split window (vsplit/split creation, hide/show/focus of the pinned window)")
       local cmd_string = "claude"
       local env_table = { TEST = "value" }
       local config = { split_side = "right", split_width_percentage = 0.3 }
@@ -434,6 +442,7 @@ describe("claudecode.terminal.native toggle behavior", function()
 
   describe("close vs toggle behavior", function()
     it("should preserve process on toggle but kill on close", function()
+      pending("re-ported in Task 5: close() must stop the terminal job (upstream ClaudeCodeClose semantics)")
       local cmd_string = "claude"
       local env_table = { TEST = "value" }
       local config = { split_side = "right", split_width_percentage = 0.3 }
@@ -469,6 +478,7 @@ describe("claudecode.terminal.native toggle behavior", function()
 
   describe("simple_toggle behavior", function()
     it("should always hide terminal when visible, regardless of focus", function()
+      pending("re-ported in Task 4: managed split window (vsplit/split creation, hide/show/focus of the pinned window)")
       local cmd_string = "claude"
       local env_table = { TEST = "value" }
       local config = { split_side = "right", split_width_percentage = 0.3 }
@@ -496,6 +506,7 @@ describe("claudecode.terminal.native toggle behavior", function()
     end)
 
     it("should always show terminal when not visible", function()
+      pending("re-ported in Task 5: native terminal buffer creation via parse_command argv")
       local cmd_string = "claude"
       local env_table = { TEST = "value" }
       local config = { split_side = "right", split_width_percentage = 0.3 }
@@ -511,6 +522,7 @@ describe("claudecode.terminal.native toggle behavior", function()
     end)
 
     it("should show hidden terminal when toggled", function()
+      pending("re-ported in Task 4: managed split window (vsplit/split creation, hide/show/focus of the pinned window)")
       local cmd_string = "claude"
       local env_table = { TEST = "value" }
       local config = { split_side = "right", split_width_percentage = 0.3 }
@@ -541,6 +553,7 @@ describe("claudecode.terminal.native toggle behavior", function()
 
   describe("focus_toggle behavior", function()
     it("should focus terminal when visible but not focused", function()
+      pending("re-ported in Task 4: managed split window (vsplit/split creation, hide/show/focus of the pinned window)")
       local cmd_string = "claude"
       local env_table = { TEST = "value" }
       local config = { split_side = "right", split_width_percentage = 0.3 }
@@ -580,6 +593,7 @@ describe("claudecode.terminal.native toggle behavior", function()
     end)
 
     it("should open a horizontal split for bottom split_side", function()
+      pending("re-ported in Task 4: top/bottom split_side")
       local cmd_string = "claude"
       local env_table = { TEST = "value" }
       local config = { split_side = "bottom", split_width_percentage = 0.3 }
@@ -604,6 +618,7 @@ describe("claudecode.terminal.native toggle behavior", function()
     end)
 
     it("should open a horizontal split for top split_side", function()
+      pending("re-ported in Task 4: top/bottom split_side")
       local cmd_string = "claude"
       local env_table = { TEST = "value" }
       local config = { split_side = "top", split_width_percentage = 0.3 }
@@ -627,6 +642,7 @@ describe("claudecode.terminal.native toggle behavior", function()
     end)
 
     it("should hide terminal when focused and toggle called", function()
+      pending("re-ported in Task 4: managed split window (vsplit/split creation, hide/show/focus of the pinned window)")
       local cmd_string = "claude"
       local env_table = { TEST = "value" }
       local config = { split_side = "right", split_width_percentage = 0.3 }

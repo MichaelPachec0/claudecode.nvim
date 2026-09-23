@@ -1,6 +1,7 @@
 ---@brief WebSocket server for Claude Code Neovim integration
 local claudecode_main = require("claudecode") -- Added for version access
 local logger = require("claudecode.logger")
+local session_manager = require("claudecode.session")
 local tcp_server = require("claudecode.server.tcp")
 local tools = require("claudecode.tools.init") -- Added: Require the tools module
 
@@ -58,6 +59,20 @@ function M.start(config, auth_token)
         logger.debug("server", "WebSocket client connected (no auth):", client.id)
       end
 
+      -- Bind client to the most recently created session that has no client
+      -- yet. Sessions are created right before their Claude CLI process
+      -- spawns, so the newest unbound session is the one whose handshake is
+      -- arriving now. Avoids a race where switching Neovim tabs between
+      -- termopen and the websocket handshake would otherwise route the new
+      -- client to whatever tab the user happens to be focused on.
+      local target_session = session_manager.find_unbound_session()
+      if target_session then
+        session_manager.bind_client(target_session.id, client.id)
+        logger.debug("server", "Bound client", client.id, "to session", target_session.id)
+      else
+        logger.debug("server", "No unbound session available for client", client.id)
+      end
+
       -- Notify main module about new connection for queue processing
       local main_module = require("claudecode")
       if main_module.process_mention_queue then
@@ -67,6 +82,8 @@ function M.start(config, auth_token)
       end
     end,
     on_disconnect = function(client, code, reason)
+      -- Unbind client from session before removing
+      session_manager.unbind_client(client.id)
       logger.debug(
         "server",
         "WebSocket client disconnected:",
@@ -409,6 +426,65 @@ function M.broadcast(method, params)
   local json_message = vim.json.encode(message)
   tcp_server.broadcast(M.state.server, json_message)
   return true
+end
+
+---Send a message to a specific session's bound client
+---@param session_id string The session ID
+---@param method string The method name
+---@param params table|nil The parameters to send
+---@return boolean success Whether message was sent successfully
+function M.send_to_session(session_id, method, params)
+  if not M.state.server then
+    return false
+  end
+
+  local session = session_manager.get_session(session_id)
+  if not session or not session.client_id then
+    logger.debug("server", "Cannot send to session", session_id, "- no bound client")
+    return false
+  end
+
+  local client = M.state.server and M.state.server.clients[session.client_id]
+  if not client then
+    logger.debug("server", "Cannot send to session", session_id, "- client not found")
+    return false
+  end
+
+  return M.send(client, method, params)
+end
+
+---Send a message to the active session's bound client
+---@param method string The method name
+---@param params table|nil The parameters to send
+---@return boolean success Whether message was sent successfully
+function M.send_to_active_session(method, params)
+  local active_session_id = session_manager.get_active_session_id()
+  if not active_session_id then
+    -- Fallback to broadcast if no active session
+    logger.debug("server", "No active session, falling back to broadcast")
+    return M.broadcast(method, params)
+  end
+
+  return M.send_to_session(active_session_id, method, params)
+end
+
+---Get the session ID for a client
+---@param client_id string The client ID
+---@return string|nil session_id The session ID or nil
+function M.get_client_session(client_id)
+  local session = session_manager.find_session_by_client(client_id)
+  if session then
+    return session.id
+  end
+  return nil
+end
+
+---Bind a client to a session
+---@param client_id string The client ID
+---@param session_id string The session ID
+---@return boolean success Whether binding was successful
+function M.bind_client_to_session(client_id, session_id)
+  return session_manager.bind_client(session_id, client_id)
 end
 
 ---Get server status information

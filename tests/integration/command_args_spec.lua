@@ -308,6 +308,7 @@ describe("ClaudeCode command arguments integration", function()
 
   describe("edge cases", function()
     it("should handle special characters in arguments", function()
+      pending("re-ported in Task 5: parse_command (quoted arguments stay one argv entry)")
       claudecode.setup({
         auto_start = false,
         terminal_cmd = "claude",

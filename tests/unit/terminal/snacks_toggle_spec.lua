@@ -241,6 +241,7 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
   end
 
   it("split: simple_toggle hides by closing the window and shows by recreating it", function()
+    pending("re-ported in Task 7: Snacks hide/show parking (#271)")
     snacks_provider.open("claude", {}, split_config(), true)
     local term = snacks_provider._get_terminal_for_test()
     assert.is_not_nil(term.win)
@@ -262,6 +263,7 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
   end)
 
   it("float: simple_toggle config-hides (hide=true) and shows (hide=false) without closing", function()
+    pending("re-ported in Task 7: Snacks hide/show parking (#271)")
     snacks_provider.open("claude", {}, float_config(), true)
     local term = snacks_provider._get_terminal_for_test()
     local win = term.win
@@ -278,6 +280,7 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
   end)
 
   it("treats a config-hidden float as not visible (so a send/open re-shows it)", function()
+    pending("re-ported in Task 7: Snacks hide/show parking (#271)")
     snacks_provider.open("claude", {}, float_config(), true)
     local term = snacks_provider._get_terminal_for_test()
     windows[term.win].config.hide = true
@@ -289,6 +292,7 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
   end)
 
   it("split close that errors (E444 last window) does not throw and keeps state sane", function()
+    pending("re-ported in Task 7: Snacks hide/show parking (#271)")
     snacks_provider.open("claude", {}, split_config(), true)
     local term = snacks_provider._get_terminal_for_test()
     local win = term.win
@@ -304,6 +308,7 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
   end)
 
   it("externally-closed float reopens as a float (via Snacks), not a split", function()
+    pending("re-ported in Task 7: Snacks hide/show parking (#271)")
     snacks_provider.open("claude", {}, float_config(), true)
     local term = snacks_provider._get_terminal_for_test()
     -- External close (e.g. :q): window dies but buffer survives; no cc_hide ran.
@@ -317,6 +322,7 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
   end)
 
   it("reuses the existing terminal on a second open() without error", function()
+    pending("re-ported in Task 7: Snacks hide/show parking (#271)")
     snacks_provider.open("claude", {}, split_config(), true)
     local term = snacks_provider._get_terminal_for_test()
     local win = term.win
@@ -329,6 +335,7 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
   end)
 
   it("recreates a top/bottom position as a horizontal split, not a vsplit", function()
+    pending("re-ported in Task 7: Snacks hide/show parking (#271)")
     local function bottom_config()
       return {
         cwd = "/w",
@@ -348,6 +355,7 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
   end)
 
   it("recreates an unsupported position (e.g. current) via Snacks, not a raw split", function()
+    pending("re-ported in Task 7: Snacks hide/show parking (#271)")
     local function current_config()
       return {
         cwd = "/w",

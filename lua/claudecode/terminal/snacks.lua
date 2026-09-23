@@ -1,11 +1,25 @@
 ---Snacks.nvim terminal provider for Claude Code.
+---Supports multiple terminal sessions.
+---Buffer-only management - window_manager handles all window operations.
 ---@module 'claudecode.terminal.snacks'
 
 local M = {}
 
 local snacks_available, Snacks = pcall(require, "snacks")
+local osc_handler = require("claudecode.terminal.osc_handler")
+local session_manager = require("claudecode.session")
 local utils = require("claudecode.utils")
+
+-- Legacy single terminal support (backward compatibility)
 local terminal = nil
+
+-- Multi-session terminal storage
+---@type table<string, table> Map of session_id -> terminal instance
+local terminals = {}
+
+-- Track sessions being intentionally closed (to suppress exit error messages)
+---@type table<string, boolean>
+local closing_sessions = {}
 
 --- @return boolean
 local function is_available()
@@ -15,20 +29,131 @@ end
 ---Setup event handlers for terminal instance
 ---@param term_instance table The Snacks terminal instance
 ---@param config table Configuration options
-local function setup_terminal_events(term_instance, config)
+---@param session_id string|nil Optional session ID for multi-session support
+local function setup_terminal_events(term_instance, config, session_id)
   local logger = require("claudecode.logger")
+  local window_manager = require("claudecode.terminal.window_manager")
 
   -- Handle command completion/exit - only if auto_close is enabled
   if config.auto_close then
     term_instance:on("TermClose", function()
-      if vim.v.event.status ~= 0 then
+      -- Check if this was an intentional close (via close_session_keep_window)
+      local is_intentional_close = session_id and closing_sessions[session_id]
+
+      -- Only show error if this wasn't an intentional close
+      if vim.v.event.status ~= 0 and not is_intentional_close then
         logger.error("terminal", "Claude exited with code " .. vim.v.event.status .. ".\nCheck for any errors.")
       end
 
-      -- Clean up
-      terminal = nil
+      -- If this was an intentional close, close_session_keep_window already handled
+      -- the session switching - we just need minimal cleanup here
+      if is_intentional_close then
+        logger.debug("terminal", "TermClose for intentionally closed session, skipping switch logic")
+        if session_id then
+          terminals[session_id] = nil
+          closing_sessions[session_id] = nil
+        end
+        if terminal == term_instance then
+          terminal = nil
+        end
+        return
+      end
+
+      -- Check if there are other sessions before destroying
+      local session_count = session_manager.get_session_count()
+      local current_bufnr = term_instance.buf
+
+      -- Track the exited session ID for cleanup
+      local exited_session_id = session_id
+
+      -- Clean up terminal state
+      if session_id then
+        terminals[session_id] = nil
+        closing_sessions[session_id] = nil
+        -- Destroy the session in session manager (only if it still exists)
+        if session_manager.get_session(session_id) then
+          session_manager.destroy_session(session_id)
+        end
+      else
+        -- For legacy terminal, find and destroy associated session
+        if term_instance.buf then
+          local session = session_manager.find_session_by_bufnr(term_instance.buf)
+          if session then
+            exited_session_id = session.id
+            logger.debug("terminal", "Destroying session for exited terminal: " .. session.id)
+            if session_manager.get_session(session.id) then
+              session_manager.destroy_session(session.id)
+            end
+          end
+        end
+      end
+
       vim.schedule(function()
-        term_instance:close({ buf = true })
+        -- If there are other sessions, switch to the new active session
+        if session_count > 1 then
+          local new_active_id = session_manager.get_active_session_id()
+          if new_active_id then
+            local new_term = terminals[new_active_id]
+
+            -- Fallback: check if any other terminal in our table is valid
+            if not new_term or not new_term:buf_valid() then
+              for sid, term in pairs(terminals) do
+                if sid ~= exited_session_id and term and term:buf_valid() then
+                  new_term = term
+                  terminals[new_active_id] = new_term
+                  logger.debug("terminal", "Recovered terminal from table for session: " .. new_active_id)
+                  break
+                end
+              end
+            end
+
+            -- Fallback: check the global terminal variable
+            if not new_term or not new_term:buf_valid() then
+              if terminal and terminal:buf_valid() and terminal ~= term_instance then
+                new_term = terminal
+                terminals[new_active_id] = new_term
+                logger.debug("terminal", "Recovered global terminal for session: " .. new_active_id)
+              end
+            end
+
+            if new_term and new_term:buf_valid() and new_term.buf then
+              -- Display the new session's buffer in window manager's window
+              window_manager.display_buffer(new_term.buf, true)
+
+              -- Update legacy terminal reference
+              terminal = new_term
+
+              -- Re-attach tabbar
+              local winid = window_manager.get_window()
+              if winid then
+                local ok, tabbar = pcall(require, "claudecode.terminal.tabbar")
+                if ok then
+                  tabbar.attach(winid, new_term.buf, new_term)
+                end
+              end
+
+              logger.debug("terminal", "Switched to session " .. new_active_id)
+
+              -- Delete the old buffer after switching
+              if current_bufnr and vim.api.nvim_buf_is_valid(current_bufnr) then
+                vim.api.nvim_buf_delete(current_bufnr, { force = true })
+              end
+
+              vim.cmd.checktime()
+              return
+            end
+          end
+        end
+
+        -- No other sessions or couldn't switch, close the window
+        if terminal == term_instance then
+          terminal = nil
+        end
+        window_manager.close_window()
+        -- Delete the buffer
+        if current_bufnr and vim.api.nvim_buf_is_valid(current_bufnr) then
+          vim.api.nvim_buf_delete(current_bufnr, { force = true })
+        end
         vim.cmd.checktime()
       end)
     end, { buf = true })
@@ -36,334 +161,254 @@ local function setup_terminal_events(term_instance, config)
 
   -- Handle buffer deletion
   term_instance:on("BufWipeout", function()
-    logger.debug("terminal", "Terminal buffer wiped")
-    terminal = nil
+    logger.debug("terminal", "Terminal buffer wiped" .. (session_id and (" for session " .. session_id) or ""))
+
+    -- Cleanup OSC handler
+    if term_instance.buf then
+      osc_handler.cleanup_buffer_handler(term_instance.buf)
+    end
+
+    if session_id then
+      terminals[session_id] = nil
+      if session_manager.get_session(session_id) then
+        session_manager.destroy_session(session_id)
+      end
+    else
+      if term_instance.buf then
+        local session = session_manager.find_session_by_bufnr(term_instance.buf)
+        if session then
+          logger.debug("terminal", "Destroying session for wiped terminal: " .. session.id)
+          if session_manager.get_session(session.id) then
+            session_manager.destroy_session(session.id)
+          end
+        end
+      end
+      terminal = nil
+    end
   end, { buf = true })
 end
 
----Builds Snacks terminal options with focus control
+---Track terminal PID with retry mechanism
+---Snacks.terminal.open() may not set terminal_job_id immediately on the buffer.
+---This function retries tracking until successful or max retries reached.
+---@param term_buf number The terminal buffer number
+---@param max_retries number Maximum number of retries (default 5)
+---@param delay_ms number Delay between retries in milliseconds (default 50)
+local function track_pid_with_retry(term_buf, max_retries, delay_ms)
+  max_retries = max_retries or 5
+  delay_ms = delay_ms or 50
+  local retries = 0
+
+  local function try_track()
+    if not term_buf or not vim.api.nvim_buf_is_valid(term_buf) then
+      return
+    end
+
+    local ok, job_id = pcall(vim.api.nvim_buf_get_var, term_buf, "terminal_job_id")
+    if ok and job_id then
+      local terminal_module = require("claudecode.terminal")
+      if terminal_module.track_terminal_pid then
+        terminal_module.track_terminal_pid(job_id)
+        local logger = require("claudecode.logger")
+        logger.debug("terminal", "PID tracked for job_id: " .. tostring(job_id) .. " (attempt " .. (retries + 1) .. ")")
+      end
+      return
+    end
+
+    retries = retries + 1
+    if retries < max_retries then
+      vim.defer_fn(try_track, delay_ms * retries)
+    else
+      local logger = require("claudecode.logger")
+      logger.warn("terminal", "Failed to track PID for buffer " .. term_buf .. " after " .. max_retries .. " retries")
+    end
+  end
+
+  -- Start the first attempt
+  try_track()
+end
+
+---Build initial title for session tabs
+---@param session_id string|nil Optional session ID
+---@return string title The title string
+local function build_initial_title(session_id)
+  local sm = require("claudecode.session")
+  local reg = require("claudecode.tab_registry")
+  -- Title in tab N's terminal should reflect tab N's sessions only — strictly
+  -- tab-scoped, no fallthrough for unbound sessions.
+  local ok_tab, current_tab = pcall(vim.api.nvim_get_current_tabpage)
+  local sessions = {}
+  if ok_tab and current_tab then
+    for _, s in ipairs(sm.list_sessions()) do
+      if reg.tab_for_session(s.id) == current_tab then
+        table.insert(sessions, s)
+      end
+    end
+  end
+  local active_id = session_id or sm.get_active_session_id()
+
+  if #sessions == 0 then
+    return "Claude Code"
+  end
+
+  local parts = {}
+  for i, session in ipairs(sessions) do
+    local is_active = session.id == active_id
+    local name = session.name or ("Session " .. i)
+    if #name > 15 then
+      name = name:sub(1, 12) .. "..."
+    end
+    local label = string.format("%d:%s", i, name)
+    if is_active then
+      label = "[" .. label .. "]"
+    end
+    table.insert(parts, label)
+  end
+  table.insert(parts, "[+]")
+  return table.concat(parts, " | ")
+end
+
+---Builds Snacks terminal options for buffer creation (no window focus)
 ---@param config ClaudeCodeTerminalConfig Terminal configuration
 ---@param env_table table Environment variables to set for the terminal process
----@param focus boolean|nil Whether to focus the terminal when opened (defaults to true)
----@return snacks.terminal.Opts opts Snacks terminal options with start_insert/auto_insert controlled by focus parameter
-local function build_opts(config, env_table, focus)
-  focus = utils.normalize_focus(focus)
-  local should_insert = focus and config.auto_insert ~= false
+---@param session_id string|nil Optional session ID for title
+---@return snacks.terminal.Opts opts Snacks terminal options
+local function build_opts(config, env_table, session_id)
+  -- Build keys table with optional exit_terminal keymap
+  local keys = {
+    claude_new_line = {
+      "<S-CR>",
+      function()
+        vim.api.nvim_feedkeys("\\", "t", true)
+        vim.defer_fn(function()
+          vim.api.nvim_feedkeys("\r", "t", true)
+        end, 10)
+      end,
+      mode = "t",
+      desc = "New line",
+    },
+  }
+
+  -- Only add exit_terminal keymap to Snacks keys if smart ESC handling is disabled
+  local esc_timeout = config.esc_timeout
+  if (not esc_timeout or esc_timeout == 0) and config.keymaps and config.keymaps.exit_terminal then
+    keys.claude_exit_terminal = {
+      config.keymaps.exit_terminal,
+      "<C-\\><C-n>",
+      mode = "t",
+      desc = "Exit terminal mode",
+    }
+  end
+
+  -- Build title for tabs if enabled
+  local title = nil
+  if config.tabs and config.tabs.enabled then
+    title = build_initial_title(session_id)
+  end
+
+  -- Merge user's snacks_win_opts
+  local win_opts = vim.tbl_deep_extend("force", {
+    position = config.split_side,
+    width = config.split_width_percentage,
+    height = 0,
+    relative = "editor",
+    keys = keys,
+    title = title,
+    title_pos = title and "center" or nil,
+    wo = {},
+  } --[[@as snacks.win.Config]], config.snacks_win_opts or {})
+
   return {
     env = env_table,
     cwd = config.cwd,
-    start_insert = should_insert,
-    auto_insert = should_insert,
+    start_insert = false, -- Don't auto-start insert, window_manager handles focus
+    auto_insert = false,
     auto_close = false,
-    win = vim.tbl_deep_extend("force", {
-      position = config.split_side,
-      width = config.split_width_percentage,
-      height = 0,
-      relative = "editor",
-      keys = {
-        claude_new_line = {
-          "<S-CR>",
-          function()
-            vim.api.nvim_feedkeys("\\", "t", true)
-            vim.defer_fn(function()
-              vim.api.nvim_feedkeys("\r", "t", true)
-            end, 10)
-          end,
-          mode = "t",
-          desc = "New line",
-        },
-      },
-    } --[[@as snacks.win.Config]], config.snacks_win_opts or {}),
+    win = win_opts,
   } --[[@as snacks.terminal.Opts]]
 end
 
--- ---------------------------------------------------------------------------
--- Climbing-cursor workaround (#240 split / #183 float).
---
--- Snacks hides a terminal by CLOSING its window (nvim_win_close) and re-shows it
--- by recreating the window in open_win(). That recreate leaves Claude's terminal
--- cursor anchor one row off; Claude (Ink) re-renders relative to the cursor on
--- the focus-in event Neovim sends when the window is shown, so the prompt climbs
--- one row per toggle. Neither a pty resize nor the focus event alone causes it --
--- it is the destroy+recreate of the window. To avoid disturbing the anchor we
--- manage hide/show ourselves:
---   * floating window -> nvim_win_set_config({hide=true/false}) keeps the window
---     (and its grid/cursor) alive. Requires nvim-0.10 (the `hide` win-config field).
---   * split window -> cannot be config-hidden, so close on hide and recreate with
---     a plain vsplit + nvim_win_set_buf on show, exactly like the native provider
---     (which does not drift). Buffer-local state (the <S-CR> map) survives.
--- ---------------------------------------------------------------------------
+---Create a terminal buffer without keeping snacks' window
+---Preserves existing window dimensions when window_manager already has a window
+---@param cmd_string string Command to run
+---@param env_table table Environment variables
+---@param config table Terminal configuration
+---@param session_id string Session ID
+---@return table|nil term_instance The snacks terminal instance
+local function create_terminal_buffer(cmd_string, env_table, config, session_id)
+  local logger = require("claudecode.logger")
+  local window_manager = require("claudecode.terminal.window_manager")
 
-local function win_get_config(win)
-  if not (win and vim.api.nvim_win_is_valid(win)) then
-    return nil
+  -- Save existing window dimensions BEFORE snacks creates its window
+  -- Snacks.terminal.open() will create a split that may affect our window size
+  local saved_winid = window_manager.get_window()
+  local saved_width, saved_height
+  if saved_winid and vim.api.nvim_win_is_valid(saved_winid) then
+    saved_width = vim.api.nvim_win_get_width(saved_winid)
+    saved_height = vim.api.nvim_win_get_height(saved_winid)
+    logger.debug("terminal", string.format("Saved window dimensions: %dx%d", saved_width, saved_height))
   end
-  local ok, cfg = pcall(vim.api.nvim_win_get_config, win)
-  if ok then
-    return cfg
+
+  local opts = build_opts(config, env_table, session_id)
+  local term_instance = Snacks.terminal.open(cmd_string, opts)
+
+  if term_instance and term_instance:buf_valid() then
+    -- Immediately close snacks' window (buffer stays alive)
+    -- We'll display the buffer in window_manager's window instead
+    if term_instance.win and vim.api.nvim_win_is_valid(term_instance.win) then
+      pcall(vim.api.nvim_win_close, term_instance.win, false)
+      term_instance.win = nil
+      logger.debug("terminal", "Closed snacks window for session: " .. session_id)
+    end
+
+    -- Restore the original window dimensions if they were saved
+    -- This fixes the issue where creating a new session resizes the window
+    if saved_winid and vim.api.nvim_win_is_valid(saved_winid) and saved_width then
+      vim.api.nvim_win_set_width(saved_winid, saved_width)
+      if saved_height then
+        vim.api.nvim_win_set_height(saved_winid, saved_height)
+      end
+      logger.debug("terminal", string.format("Restored window dimensions: %dx%d", saved_width, saved_height or 0))
+    end
+
+    -- Track PID for cleanup on Neovim exit (with retry mechanism)
+    -- Snacks.terminal.open() may not set terminal_job_id immediately
+    if term_instance.buf then
+      track_pid_with_retry(term_instance.buf, 5, 50)
+
+      -- Set up BufUnload autocmd to ensure job is stopped when buffer is deleted
+      -- This catches :bd!, Neovim exit, and any other buffer deletion path
+      -- that bypasses close_session()
+      vim.api.nvim_create_autocmd("BufUnload", {
+        buffer = term_instance.buf,
+        once = true,
+        callback = function()
+          local unload_ok, unload_job_id = pcall(vim.api.nvim_buf_get_var, term_instance.buf, "terminal_job_id")
+          if unload_ok and unload_job_id then
+            -- Get Unix PID from Neovim job ID
+            local pid_ok, pid = pcall(vim.fn.jobpid, unload_job_id)
+            if pid_ok and pid and pid > 0 then
+              -- Kill child processes first (shell wrappers like fish don't forward SIGTERM)
+              pcall(vim.fn.system, "pkill -TERM -P " .. pid .. " 2>/dev/null")
+            end
+            pcall(vim.fn.jobstop, unload_job_id)
+          end
+        end,
+      })
+    end
+
+    setup_terminal_events(term_instance, config, session_id)
+    return term_instance
   end
+
   return nil
-end
-
--- A real split window reports relative == "" regardless of the opts Snacks was
--- given; a float reports "editor"/"win"/"cursor".
-local function win_is_floating(win)
-  local cfg = win_get_config(win)
-  return cfg ~= nil and cfg.relative ~= nil and cfg.relative ~= ""
-end
-
-local function win_is_config_hidden(win)
-  local cfg = win_get_config(win)
-  return cfg ~= nil and cfg.hide == true
-end
-
-local function supports_config_hide()
-  return vim.fn ~= nil and vim.fn.has ~= nil and vim.fn.has("nvim-0.10") == 1
-end
-
--- Resolve a Snacks width/height value to an absolute cell count: a fraction in
--- (0,1) scales `total`; a value >= 1 is taken as absolute; otherwise fall back
--- to `default_frac` of `total`.
-local function resolve_split_size(val, total, default_frac)
-  if type(val) == "number" and val > 0 then
-    if val < 1 then
-      return math.max(1, math.floor(total * val))
-    end
-    return math.floor(val)
-  end
-  return math.max(1, math.floor(total * default_frac))
-end
-
-local function start_insert_if_terminal(term)
-  if
-    term.buf
-    and vim.api.nvim_buf_is_valid(term.buf)
-    and vim.api.nvim_buf_get_option(term.buf, "buftype") == "terminal"
-    and term.win
-    and vim.api.nvim_win_is_valid(term.win)
-  then
-    vim.api.nvim_win_call(term.win, function()
-      vim.cmd("startinsert")
-    end)
-  end
-end
-
--- Enter insert mode unless the user opted out via terminal.auto_insert = false
--- (issue #232). When disabled, re-focusing the terminal window keeps Normal mode
--- and preserves the scroll position instead of jumping to the prompt.
-local function maybe_start_insert(term, config)
-  if not config or config.auto_insert ~= false then
-    start_insert_if_terminal(term)
-  end
-end
-
--- Visible == a live window that shows our buffer and is not config-hidden.
-local function cc_is_visible(term)
-  local win = term and term.win
-  if not (win and vim.api.nvim_win_is_valid(win)) then
-    return false
-  end
-  if win_is_config_hidden(win) then
-    return false
-  end
-  -- Match Snacks' own valid() / the native provider: a window showing some other
-  -- buffer is not "our" terminal being visible.
-  return vim.api.nvim_win_get_buf(win) == term.buf
-end
-
-local function set_backdrop_hidden(term, hidden)
-  if term.backdrop and term.backdrop.win and vim.api.nvim_win_is_valid(term.backdrop.win) then
-    pcall(vim.api.nvim_win_set_config, term.backdrop.win, { hide = hidden })
-  end
-end
-
--- Re-apply the Snacks-managed window-local options/vars that are lost when a
--- split window is closed and recreated (minimal style turns off number/sign
--- column, sets winhighlight, etc.), so the re-shown split matches the original.
-local function reapply_snacks_window_state(term, win)
-  if not (term.opts and vim.api.nvim_win_is_valid(win)) then
-    return
-  end
-  if snacks_available and Snacks and Snacks.util and Snacks.util.wo and term.opts.wo then
-    pcall(Snacks.util.wo, win, term.opts.wo)
-  end
-  for k, v in pairs(term.opts.w or {}) do
-    pcall(function()
-      vim.w[win][k] = v
-    end)
-  end
-  -- Stacking marker so a second Snacks split can equalize against this one.
-  pcall(function()
-    vim.w[win].snacks_win = { id = term.id, position = term.opts.position }
-  end)
-end
-
----Hide the terminal window without disturbing the cursor anchor.
----@param term table Snacks terminal instance
-local function cc_hide(term)
-  if not cc_is_visible(term) then
-    return
-  end
-  local logger = require("claudecode.logger")
-  local win = term.win
-  if win_is_floating(win) then
-    if supports_config_hide() then
-      logger.debug("terminal", "Snacks hide: config-hiding float (hide=true)")
-      if term._cc then
-        term._cc.kind = "float"
-      end
-      vim.api.nvim_win_set_config(win, { hide = true })
-      set_backdrop_hidden(term, true)
-      -- Neovim does not auto-leave a config-hidden window; step out of it.
-      if vim.api.nvim_get_current_win() == win then
-        pcall(vim.cmd, "wincmd p")
-      end
-    elseif term._cc and term._cc.orig_hide then
-      -- Pre-0.10 float: no config-hide available, fall back to Snacks (cursor
-      -- drift is not avoidable on these versions). Recreate as a float on show.
-      logger.debug("terminal", "Snacks hide: pre-0.10 float via Snacks (drift unavoidable)")
-      term._cc.kind = "float"
-      term._cc.orig_hide(term)
-    end
-  else
-    -- Split: close the window, keep the buffer + job alive. pcall so closing the
-    -- LAST window (E444) is a harmless no-op instead of a throw; only forget the
-    -- window on a successful close so state stays consistent.
-    logger.debug("terminal", "Snacks hide: closing split window")
-    if term._cc then
-      term._cc.kind = "split"
-    end
-    if pcall(vim.api.nvim_win_close, win, false) then
-      term.win = nil
-    end
-  end
-end
-
----Show the terminal window, recreating splits the native way.
----@param term table Snacks terminal instance
----@param focus boolean Whether to focus the terminal and enter insert mode
----@param config table Effective terminal config (split_side, split_width_percentage)
----@return boolean shown
-local function cc_show(term, focus, config)
-  if not (term and term.buf and vim.api.nvim_buf_is_valid(term.buf)) then
-    return false
-  end
-  local logger = require("claudecode.logger")
-  local win = term.win
-
-  -- Config-hidden float -> just un-hide it.
-  if win and vim.api.nvim_win_is_valid(win) and win_is_config_hidden(win) then
-    logger.debug("terminal", "Snacks show: un-hiding config-hidden float")
-    vim.api.nvim_win_set_config(win, { hide = false })
-    set_backdrop_hidden(term, false)
-    if focus then
-      vim.api.nvim_set_current_win(win)
-      maybe_start_insert(term, config)
-    end
-    return true
-  end
-
-  -- Already visible -> optionally focus.
-  if cc_is_visible(term) then
-    if focus then
-      vim.api.nvim_set_current_win(term.win)
-      maybe_start_insert(term, config)
-    end
-    return true
-  end
-
-  -- Window is fully gone. Recreate it honoring the configured Snacks position:
-  --   * float / any non-split position -> let Snacks re-create it (it owns the
-  --     geometry); recreating it as a plain split would change its kind.
-  --   * left/right -> vertical split, top/bottom -> horizontal split. Recreated
-  --     natively (the drift-free path), sized from the resolved Snacks opts.
-  local win_opts = (config and config.snacks_win_opts) or {}
-  local position = win_opts.position or (config and config.split_side) or "right"
-  local is_native_split = position == "left" or position == "right" or position == "top" or position == "bottom"
-  if (not is_native_split or (term._cc and term._cc.kind == "float")) and term._cc and term._cc.orig_show then
-    logger.debug("terminal", "Snacks show: re-creating via Snacks (position=" .. tostring(position) .. ")")
-    term._cc.kind = nil
-    term._cc.orig_show(term)
-    if focus and term.win and vim.api.nvim_win_is_valid(term.win) then
-      vim.api.nvim_set_current_win(term.win)
-      maybe_start_insert(term, config)
-    end
-    return true
-  end
-
-  local original_win = vim.api.nvim_get_current_win()
-  local horizontal = position == "top" or position == "bottom"
-  local lead = (position == "top" or position == "left") and "topleft " or "botright "
-  local new_win
-  if horizontal then
-    local height = resolve_split_size(win_opts.height, vim.o.lines, 0.30)
-    logger.debug("terminal", "Snacks show: re-creating " .. position .. " split (native, h=" .. height .. ")")
-    vim.cmd(lead .. height .. "split")
-    new_win = vim.api.nvim_get_current_win()
-  else
-    local width = resolve_split_size(win_opts.width, vim.o.columns, (config and config.split_width_percentage) or 0.30)
-    logger.debug("terminal", "Snacks show: re-creating " .. position .. " split (native, w=" .. width .. ")")
-    vim.cmd(lead .. width .. "vsplit")
-    new_win = vim.api.nvim_get_current_win()
-  end
-  -- Set term.win before nvim_win_set_buf so Snacks' fixbuf BufWinEnter autocmd
-  -- (if still registered) sees a valid window and does not self-delete.
-  term.win = new_win
-  vim.api.nvim_win_set_buf(new_win, term.buf)
-  if not horizontal then
-    vim.api.nvim_win_set_height(new_win, vim.o.lines) -- full height for vertical splits, like native
-  end
-  term.closed = false
-  reapply_snacks_window_state(term, new_win)
-  if focus then
-    maybe_start_insert(term, config)
-  elseif vim.api.nvim_win_is_valid(original_win) then
-    vim.api.nvim_set_current_win(original_win)
-  end
-  return true
-end
-
----State stashed on a patched Snacks terminal instance.
----@class ClaudeCodeSnacksPatch
----@field orig_hide fun(self: table) Snacks' original Win:hide
----@field orig_show fun(self: table) Snacks' original Win:show
----@field orig_toggle fun(self: table) Snacks' original Win:toggle
----@field config table Effective terminal config captured at open time
----@field kind? "float"|"split" Window kind recorded at hide time
-
--- Monkeypatch the Snacks terminal instance so hide/show/toggle -- including any
--- the user wires to Snacks keymaps (e.g. self:hide() in snacks_win_opts.keys) --
--- use the anchor-preserving paths above instead of Snacks' destroy+recreate.
-local function patch_instance(term, config)
-  term._cc = {
-    orig_hide = term.hide,
-    orig_show = term.show,
-    orig_toggle = term.toggle,
-    config = config,
-  }
-  function term:hide()
-    cc_hide(self)
-    return self
-  end
-  function term:show()
-    cc_show(self, true, self._cc and self._cc.config)
-    return self
-  end
-  function term:toggle()
-    if cc_is_visible(self) then
-      cc_hide(self)
-    else
-      cc_show(self, true, self._cc and self._cc.config)
-    end
-    return self
-  end
 end
 
 function M.setup()
   -- No specific setup needed for Snacks provider
 end
 
----Open a terminal using Snacks.nvim
+---Open a terminal using Snacks.nvim (legacy interface)
 ---@param cmd_string string
 ---@param env_table table
 ---@param config ClaudeCodeTerminalConfig
@@ -374,52 +419,65 @@ function M.open(cmd_string, env_table, config, focus)
     return
   end
 
+  local window_manager = require("claudecode.terminal.window_manager")
   focus = utils.normalize_focus(focus)
 
   if terminal and terminal:buf_valid() then
-    -- Reuse the existing terminal. Route through cc_show so a hidden terminal is
-    -- restored without Snacks destroying+recreating the window (which would climb
-    -- Claude's cursor -- #240/#183). cc_show honors config.auto_insert (#232).
-    cc_show(terminal, focus, config)
+    -- Terminal exists, display it via window manager
+    window_manager.display_buffer(terminal.buf, focus)
     return
   end
 
-  local opts = build_opts(config, env_table, focus)
-  -- Pass an argv list (not a string) so Snacks spawns Claude via termopen()
-  -- without a shell. A shell would glob-expand bracketed model aliases like
-  -- "opus[1m]" (e.g. zsh aborts with "no matches found"). parse_command keeps
-  -- quoted arguments intact and expands a leading "~". Mirrors native.
-  local cmd = utils.parse_command(cmd_string)
-  local term_instance = Snacks.terminal.open(cmd, opts)
+  -- Ensure a session exists
+  local session_id = session_manager.ensure_session()
+
+  -- Create terminal buffer
+  local term_instance = create_terminal_buffer(cmd_string, env_table, config, session_id)
+
   if term_instance and term_instance:buf_valid() then
-    setup_terminal_events(term_instance, config)
-    patch_instance(term_instance, config)
     terminal = term_instance
-    vim.bo[term_instance.buf].filetype = "claudecode"
+    terminals[session_id] = term_instance
+
+    -- Display buffer via window manager
+    window_manager.display_buffer(term_instance.buf, focus)
+
+    -- Set up smart ESC handling if enabled
+    local terminal_module = require("claudecode.terminal")
+    if config.esc_timeout and config.esc_timeout > 0 and term_instance.buf then
+      terminal_module.setup_terminal_keymaps(term_instance.buf, config)
+    end
+
+    -- Set up scroll keymaps (scroll up to view scrollback by default)
+    if term_instance.buf then
+      terminal_module.setup_scroll_keymaps(term_instance.buf, config)
+    end
+
+    -- Update session info
+    session_manager.update_terminal_info(session_id, {
+      bufnr = term_instance.buf,
+      winid = window_manager.get_window(),
+    })
+
+    -- Register buffer-to-session mapping for cleanup on BufUnload (Fix 1)
+    require("claudecode.terminal").register_buffer_session(term_instance.buf, session_id)
+
+    -- Attach tabbar
+    local winid = window_manager.get_window()
+    if winid then
+      vim.schedule(function()
+        if vim.api.nvim_win_is_valid(winid) then
+          local ok, tabbar = pcall(require, "claudecode.terminal.tabbar")
+          if ok then
+            tabbar.attach(winid, term_instance.buf, term_instance)
+          end
+        end
+      end)
+    end
   else
     terminal = nil
     local logger = require("claudecode.logger")
-    local error_details = {}
-    if not term_instance then
-      table.insert(error_details, "Snacks.terminal.open() returned nil")
-    elseif not term_instance:buf_valid() then
-      table.insert(error_details, "terminal instance is invalid")
-      if term_instance.buf and not vim.api.nvim_buf_is_valid(term_instance.buf) then
-        table.insert(error_details, "buffer is invalid")
-      end
-      if term_instance.win and not vim.api.nvim_win_is_valid(term_instance.win) then
-        table.insert(error_details, "window is invalid")
-      end
-    end
-
-    local context = string.format("cmd='%s', opts=%s", cmd_string, vim.inspect(opts))
-    local error_msg = string.format(
-      "Failed to open Claude terminal using Snacks. Details: %s. Context: %s",
-      table.concat(error_details, ", "),
-      context
-    )
-    vim.notify(error_msg, vim.log.levels.ERROR)
-    logger.debug("terminal", error_msg)
+    logger.error("terminal", "Failed to open Claude terminal using Snacks")
+    vim.notify("Failed to open Claude terminal using Snacks.", vim.log.levels.ERROR)
   end
 end
 
@@ -428,9 +486,8 @@ function M.close()
   if not is_available() then
     return
   end
-  if terminal and terminal:buf_valid() then
-    terminal:close()
-  end
+  local window_manager = require("claudecode.terminal.window_manager")
+  window_manager.close_window()
 end
 
 ---Simple toggle: always show/hide terminal regardless of focus
@@ -443,16 +500,17 @@ function M.simple_toggle(cmd_string, env_table, config)
     return
   end
 
+  local window_manager = require("claudecode.terminal.window_manager")
   local logger = require("claudecode.logger")
 
-  if terminal and terminal:buf_valid() then
-    if cc_is_visible(terminal) then
-      logger.debug("terminal", "Simple toggle: hiding visible terminal")
-      cc_hide(terminal)
-    else
-      logger.debug("terminal", "Simple toggle: showing hidden terminal")
-      cc_show(terminal, true, config)
-    end
+  if window_manager.is_visible() then
+    -- Terminal is visible, hide it
+    logger.debug("terminal", "Simple toggle: hiding terminal")
+    window_manager.close_window()
+  elseif terminal and terminal:buf_valid() then
+    -- Terminal buffer exists but not visible, show it
+    logger.debug("terminal", "Simple toggle: showing hidden terminal")
+    window_manager.display_buffer(terminal.buf, true)
   else
     logger.debug("terminal", "Simple toggle: creating new terminal")
     M.open(cmd_string, env_table, config)
@@ -469,26 +527,33 @@ function M.focus_toggle(cmd_string, env_table, config)
     return
   end
 
+  local window_manager = require("claudecode.terminal.window_manager")
   local logger = require("claudecode.logger")
 
-  if terminal and terminal:buf_valid() then
-    if not cc_is_visible(terminal) then
-      -- Terminal exists but is hidden -> show and focus it.
+  if not window_manager.is_visible() then
+    -- Terminal not visible
+    if terminal and terminal:buf_valid() then
       logger.debug("terminal", "Focus toggle: showing hidden terminal")
-      cc_show(terminal, true, config)
-    elseif terminal.win == vim.api.nvim_get_current_win() then
-      -- You're IN it -> hide it.
-      logger.debug("terminal", "Focus toggle: hiding terminal (currently focused)")
-      cc_hide(terminal)
+      window_manager.display_buffer(terminal.buf, true)
     else
-      -- Visible but not focused -> focus it.
-      logger.debug("terminal", "Focus toggle: focusing terminal")
-      vim.api.nvim_set_current_win(terminal.win)
-      maybe_start_insert(terminal, config)
+      logger.debug("terminal", "Focus toggle: creating new terminal")
+      M.open(cmd_string, env_table, config)
     end
   else
-    logger.debug("terminal", "Focus toggle: creating new terminal")
-    M.open(cmd_string, env_table, config)
+    -- Terminal is visible
+    local winid = window_manager.get_window()
+    local current_win = vim.api.nvim_get_current_win()
+
+    if winid == current_win then
+      -- We're focused on terminal, hide it
+      logger.debug("terminal", "Focus toggle: hiding terminal (currently focused)")
+      window_manager.close_window()
+    else
+      -- Terminal visible but not focused, focus it
+      logger.debug("terminal", "Focus toggle: focusing terminal")
+      vim.api.nvim_set_current_win(winid)
+      vim.cmd("startinsert")
+    end
   end
 end
 
@@ -521,6 +586,367 @@ end
 ---@return table? terminal The terminal instance, or nil
 function M._get_terminal_for_test()
   return terminal
+end
+
+-- ============================================================================
+-- Multi-session support functions
+-- ============================================================================
+
+---Open a terminal for a specific session
+---@param session_id string The session ID
+---@param cmd_string string The command to run
+---@param env_table table Environment variables
+---@param config ClaudeCodeTerminalConfig Terminal configuration
+---@param focus boolean? Whether to focus the terminal
+function M.open_session(session_id, cmd_string, env_table, config, focus)
+  if not is_available() then
+    vim.notify("Snacks.nvim terminal provider selected but Snacks.terminal not available.", vim.log.levels.ERROR)
+    return
+  end
+
+  local logger = require("claudecode.logger")
+  local window_manager = require("claudecode.terminal.window_manager")
+  focus = utils.normalize_focus(focus)
+
+  -- Check if this session already has a terminal
+  local existing_term = terminals[session_id]
+  if existing_term and existing_term:buf_valid() then
+    -- Terminal exists, display it via window manager
+    window_manager.display_buffer(existing_term.buf, focus)
+
+    -- Update tabbar
+    local winid = window_manager.get_window()
+    if winid then
+      local ok, tabbar = pcall(require, "claudecode.terminal.tabbar")
+      if ok then
+        tabbar.attach(winid, existing_term.buf, existing_term)
+      end
+    end
+
+    logger.debug("terminal", "Displayed existing terminal for session: " .. session_id)
+    return
+  end
+
+  -- Create new terminal buffer for this session
+  local term_instance = create_terminal_buffer(cmd_string, env_table, config, session_id)
+
+  if term_instance and term_instance:buf_valid() then
+    terminals[session_id] = term_instance
+    terminal = term_instance -- Also set as legacy terminal
+
+    -- Display buffer via window manager
+    window_manager.display_buffer(term_instance.buf, focus)
+
+    -- Update session manager with terminal info
+    local terminal_module = require("claudecode.terminal")
+    terminal_module.update_session_terminal_info(session_id, {
+      bufnr = term_instance.buf,
+      winid = window_manager.get_window(),
+    })
+
+    -- Register buffer-to-session mapping for cleanup on BufUnload (Fix 1)
+    terminal_module.register_buffer_session(term_instance.buf, session_id)
+
+    -- Set up smart ESC handling if enabled
+    if config.esc_timeout and config.esc_timeout > 0 and term_instance.buf then
+      terminal_module.setup_terminal_keymaps(term_instance.buf, config)
+    end
+
+    -- Set up scroll keymaps (scroll up to view scrollback by default)
+    if term_instance.buf then
+      terminal_module.setup_scroll_keymaps(term_instance.buf, config)
+    end
+
+    -- Setup OSC title handler
+    if term_instance.buf then
+      osc_handler.setup_buffer_handler(term_instance.buf, function(title)
+        if title and title ~= "" then
+          session_manager.update_session_name(session_id, title)
+        end
+      end)
+    end
+
+    -- Attach tabbar
+    local winid = window_manager.get_window()
+    if winid then
+      vim.schedule(function()
+        if vim.api.nvim_win_is_valid(winid) then
+          local ok, tabbar = pcall(require, "claudecode.terminal.tabbar")
+          if ok then
+            tabbar.attach(winid, term_instance.buf, term_instance)
+          end
+        end
+      end)
+    end
+
+    logger.debug("terminal", "Opened terminal for session: " .. session_id)
+  else
+    logger.error("terminal", "Failed to open terminal for session: " .. session_id)
+  end
+end
+
+---Close a terminal for a specific session
+---@param session_id string The session ID
+function M.close_session(session_id)
+  if not is_available() then
+    return
+  end
+
+  local term_instance = terminals[session_id]
+  if term_instance and term_instance:buf_valid() then
+    -- Mark as intentional close to suppress error message
+    closing_sessions[session_id] = true
+
+    -- Stop the job first to ensure the process is terminated
+    if term_instance.buf then
+      local ok, job_id = pcall(vim.api.nvim_buf_get_var, term_instance.buf, "terminal_job_id")
+      if ok and job_id then
+        -- Get Unix PID from Neovim job ID
+        local pid_ok, pid = pcall(vim.fn.jobpid, job_id)
+        if pid_ok and pid and pid > 0 then
+          -- Kill child processes first (shell wrappers like fish don't forward SIGTERM)
+          pcall(vim.fn.system, "pkill -TERM -P " .. pid .. " 2>/dev/null")
+        end
+        -- Then kill the shell process
+        pcall(vim.fn.jobstop, job_id)
+      end
+    end
+
+    -- Cleanup OSC handler
+    if term_instance.buf then
+      osc_handler.cleanup_buffer_handler(term_instance.buf)
+    end
+
+    -- Delete the buffer
+    if term_instance.buf and vim.api.nvim_buf_is_valid(term_instance.buf) then
+      vim.api.nvim_buf_delete(term_instance.buf, { force = true })
+    end
+
+    terminals[session_id] = nil
+
+    -- If this was the legacy terminal, clear it too
+    if terminal == term_instance then
+      terminal = nil
+    end
+  end
+end
+
+---Close a session's terminal but keep window open and switch to another session
+---@param old_session_id string The session ID to close
+---@param new_session_id string The session ID to switch to
+---@param effective_config ClaudeCodeTerminalConfig Terminal configuration
+function M.close_session_keep_window(old_session_id, new_session_id, effective_config)
+  if not is_available() then
+    return
+  end
+
+  local logger = require("claudecode.logger")
+  local window_manager = require("claudecode.terminal.window_manager")
+
+  local old_term = terminals[old_session_id]
+  local new_term = terminals[new_session_id]
+
+  -- Try to find the new session's terminal if not in terminals table
+  if not new_term or not new_term:buf_valid() then
+    local session_data = session_manager.get_session(new_session_id)
+    if session_data and session_data.terminal_bufnr then
+      if terminal and terminal:buf_valid() and terminal.buf == session_data.terminal_bufnr then
+        new_term = terminal
+        terminals[new_session_id] = new_term
+        logger.debug("terminal", "Recovered legacy terminal for new session: " .. new_session_id)
+      end
+    end
+  end
+
+  -- Try to find old_term from legacy terminal
+  if not old_term then
+    local old_session_data = session_manager.get_session(old_session_id)
+    if old_session_data and old_session_data.terminal_bufnr then
+      if terminal and terminal:buf_valid() and terminal.buf == old_session_data.terminal_bufnr then
+        old_term = terminal
+        logger.debug("terminal", "Using legacy terminal as old_term for: " .. old_session_id)
+      end
+    end
+    if not old_term then
+      logger.debug("terminal", "No terminal found for old session: " .. old_session_id)
+      return
+    end
+  end
+
+  -- Mark as intentional close
+  closing_sessions[old_session_id] = true
+
+  -- If new terminal exists, display it via window manager
+  if new_term and new_term:buf_valid() then
+    window_manager.display_buffer(new_term.buf, true)
+
+    -- Update legacy terminal reference
+    terminal = new_term
+
+    -- Update tabbar
+    local winid = window_manager.get_window()
+    if winid then
+      local ok, tabbar = pcall(require, "claudecode.terminal.tabbar")
+      if ok then
+        tabbar.attach(winid, new_term.buf, new_term)
+      end
+    end
+  else
+    -- No valid new_term found - close the window
+    logger.warn("terminal", "No valid terminal found for new session: " .. new_session_id)
+    window_manager.close_window()
+  end
+
+  -- Stop the old job first to ensure the process is terminated
+  -- Kill child processes first (shell wrappers like fish don't forward SIGTERM)
+  if old_term and old_term:buf_valid() and old_term.buf then
+    local ok, job_id = pcall(vim.api.nvim_buf_get_var, old_term.buf, "terminal_job_id")
+    if ok and job_id then
+      -- Get Unix PID from Neovim job ID
+      local pid_ok, pid = pcall(vim.fn.jobpid, job_id)
+      if pid_ok and pid and pid > 0 then
+        -- Kill child processes first (e.g., claude spawned by fish)
+        pcall(vim.fn.system, "pkill -TERM -P " .. pid .. " 2>/dev/null")
+      end
+      -- Then kill the shell process
+      pcall(vim.fn.jobstop, job_id)
+    end
+  end
+
+  -- Clean up old terminal's buffer
+  if old_term and old_term:buf_valid() then
+    if old_term.buf then
+      osc_handler.cleanup_buffer_handler(old_term.buf)
+    end
+    if old_term.buf and vim.api.nvim_buf_is_valid(old_term.buf) then
+      vim.api.nvim_buf_delete(old_term.buf, { force = true })
+    end
+  end
+
+  terminals[old_session_id] = nil
+  -- NOTE: Don't clear closing_sessions here - let TermClose handler do it
+  -- If we clear it before TermClose fires, the handler thinks it's a crash
+  -- and incorrectly closes the window
+
+  logger.debug("terminal", "Closed session " .. old_session_id .. " and switched to " .. new_session_id)
+end
+
+---Focus a terminal for a specific session
+---@param session_id string The session ID
+---@param config ClaudeCodeTerminalConfig|nil Terminal configuration for showing hidden terminal
+function M.focus_session(session_id, config)
+  if not is_available() then
+    return
+  end
+
+  local logger = require("claudecode.logger")
+  local window_manager = require("claudecode.terminal.window_manager")
+
+  local term_instance = terminals[session_id]
+
+  -- If not found in terminals table, try fallback to legacy terminal
+  if not term_instance or not term_instance:buf_valid() then
+    local session_mod = require("claudecode.session")
+    local session = session_mod.get_session(session_id)
+    if
+      session
+      and session.terminal_bufnr
+      and terminal
+      and terminal:buf_valid()
+      and terminal.buf == session.terminal_bufnr
+    then
+      logger.debug("terminal", "Registering legacy terminal for session: " .. session_id)
+      M.register_terminal_for_session(session_id, terminal.buf)
+      term_instance = terminals[session_id]
+    end
+
+    if not term_instance or not term_instance:buf_valid() then
+      logger.debug("terminal", "Cannot focus invalid session: " .. session_id)
+      return
+    end
+  end
+
+  -- Display buffer via window manager
+  window_manager.display_buffer(term_instance.buf, true)
+
+  -- Update legacy terminal reference
+  terminal = term_instance
+
+  -- Update tabbar
+  local winid = window_manager.get_window()
+  if winid then
+    local ok, tabbar = pcall(require, "claudecode.terminal.tabbar")
+    if ok then
+      tabbar.attach(winid, term_instance.buf, term_instance)
+    end
+  end
+
+  logger.debug("terminal", "Focused session: " .. session_id)
+end
+
+---Get the buffer number for a session's terminal
+---@param session_id string The session ID
+---@return number|nil bufnr The buffer number or nil
+function M.get_session_bufnr(session_id)
+  local term_instance = terminals[session_id]
+  if term_instance and term_instance:buf_valid() and term_instance.buf then
+    return term_instance.buf
+  end
+  return nil
+end
+
+---Get all session IDs with active terminals
+---@return string[] session_ids Array of session IDs
+function M.get_active_session_ids()
+  local ids = {}
+  for session_id, term_instance in pairs(terminals) do
+    if term_instance and term_instance:buf_valid() then
+      table.insert(ids, session_id)
+    end
+  end
+  return ids
+end
+
+---Register an existing terminal (from legacy path) with a session ID
+---@param session_id string The session ID
+---@param term_bufnr number|nil The buffer number (uses legacy terminal's bufnr if nil)
+function M.register_terminal_for_session(session_id, term_bufnr)
+  local logger = require("claudecode.logger")
+
+  if not term_bufnr and terminal and terminal:buf_valid() then
+    term_bufnr = terminal.buf
+  end
+
+  if not term_bufnr then
+    logger.debug("terminal", "Cannot register nil terminal for session: " .. session_id)
+    return
+  end
+
+  -- Check if already registered to another session
+  for sid, term_instance in pairs(terminals) do
+    if term_instance and term_instance:buf_valid() and term_instance.buf == term_bufnr and sid ~= session_id then
+      logger.debug(
+        "terminal",
+        "Terminal already registered to session " .. sid .. ", not registering to " .. session_id
+      )
+      return
+    end
+  end
+
+  -- Check if this session already has a different terminal
+  local existing_term = terminals[session_id]
+  if existing_term and existing_term:buf_valid() and existing_term.buf ~= term_bufnr then
+    logger.debug("terminal", "Session " .. session_id .. " already has a different terminal")
+    return
+  end
+
+  -- Register the legacy terminal with the session
+  if terminal and terminal:buf_valid() and terminal.buf == term_bufnr then
+    terminals[session_id] = terminal
+    logger.debug("terminal", "Registered terminal (bufnr=" .. term_bufnr .. ") for session: " .. session_id)
+  else
+    logger.debug("terminal", "Cannot register: terminal bufnr mismatch for session: " .. session_id)
+  end
 end
 
 ---@type ClaudeCodeTerminalProvider
