@@ -492,6 +492,9 @@ local function setup_terminal_events(term_instance, config, session_id)
 
             if new_term and new_term:buf_valid() then
               terminal = new_term
+              -- Keep the session manager and the tab's active pointer on the
+              -- session that is now in front.
+              session_manager.set_active_session(new_active_id)
               if was_visible then
                 -- Unpark the new active session in place of the exited one.
                 cc_show(new_term, true, config)

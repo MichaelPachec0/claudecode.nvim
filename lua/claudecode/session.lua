@@ -177,6 +177,13 @@ function M.set_active_session(session_id)
   end
 
   M.active_session_id = session_id
+  -- Keep the owning tab's active pointer in step: get_active_session_id() and
+  -- the per-tab toggles resolve through tab_registry, so a switch that only
+  -- updated this field would leave the tab pointing at the previous session.
+  local ok_reg, tab_registry = pcall(require, "claudecode.tab_registry")
+  if ok_reg then
+    tab_registry.set_active(session_id)
+  end
   logger.debug("session", "Activated session: " .. session_id)
 
   return true

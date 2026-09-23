@@ -964,6 +964,43 @@ describe("claudecode.terminal.window_manager", function()
       assert.is_true(saw_startinsert)
     end)
 
+    it("display_buffer with focus=false keeps the cursor out of a newly created split", function()
+      local current = 1
+      mock_vim.api.nvim_get_current_win = spy.new(function()
+        return current
+      end)
+      mock_vim.api.nvim_set_current_win = spy.new(function(w)
+        current = w
+      end)
+      mock_vim.api.nvim_win_is_valid = spy.new(function()
+        return true
+      end)
+      mock_vim.cmd = spy.new(function(c)
+        if tostring(c):find("new") then
+          current = 2 -- :new enters the split it creates
+        end
+      end)
+      mock_vim.api.nvim_buf_is_valid = spy.new(function()
+        return true
+      end)
+      mock_vim.api.nvim_buf_get_name = spy.new(function()
+        return ""
+      end)
+      mock_vim.api.nvim_win_set_buf = spy.new(function() end)
+      mock_vim.bo = setmetatable({}, {
+        __index = function()
+          return { channel = 0, buftype = "terminal" }
+        end,
+      })
+
+      window_manager.setup({ split_side = "right", split_width_percentage = 0.3 })
+      local ok = window_manager.display_buffer(7, false)
+
+      assert.is_true(ok)
+      assert.are.equal(2, window_manager.get_window())
+      assert.are.equal(1, current) -- back in the editor window
+    end)
+
     it("does not startinsert when auto_insert = false", function()
       mock_vim.api.nvim_buf_is_valid = spy.new(function()
         return true

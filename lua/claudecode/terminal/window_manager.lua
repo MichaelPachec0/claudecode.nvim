@@ -313,7 +313,9 @@ function M.display_buffer(bufnr, focus)
     return false
   end
 
-  -- Ensure window exists
+  -- Ensure window exists. Creating the split enters it, so remember where the
+  -- cursor was to honor focus = false.
+  local prev_win = vim.api.nvim_get_current_win()
   local winid = M.ensure_window()
   if not winid then
     logger.error("window_manager", "Failed to create terminal window")
@@ -343,12 +345,14 @@ function M.display_buffer(bufnr, focus)
     logger.debug("window_manager", string.format("Resized terminal channel %d to %dx%d", chan, width, height))
   end
 
-  -- Focus if requested
+  -- Focus if requested; otherwise step back out of a freshly created split
   if focus then
     vim.api.nvim_set_current_win(winid)
     if (state.config or {}).auto_insert ~= false then
       vim.cmd("startinsert")
     end
+  elseif prev_win ~= winid and vim.api.nvim_get_current_win() ~= prev_win and vim.api.nvim_win_is_valid(prev_win) then
+    vim.api.nvim_set_current_win(prev_win)
   end
 
   logger.debug("window_manager", "Displayed buffer " .. bufnr .. " in window " .. winid)

@@ -1245,10 +1245,13 @@ describe("claudecode.terminal (wrapper for Snacks.nvim)", function()
         custom_provider.hide_session:was_called_with(sid)
         custom_provider.open_session:was_not_called()
 
-        -- Parked -> simple_toggle unparks it through open_session.
+        -- Parked -> simple_toggle unparks it through open_session, focused
+        -- (upstream simple_toggle focuses the terminal when it shows it).
         visible_win = nil
         terminal_wrapper.simple_toggle()
         custom_provider.open_session:was_called(1)
+        assert.are.equal(sid, custom_provider.open_session:get_call(1).refs[1])
+        assert.is_true(custom_provider.open_session:get_call(1).refs[5])
 
         -- Visible and focused -> focus_toggle parks it via the provider.
         visible_win = vim.api.nvim_get_current_win()
@@ -1256,6 +1259,160 @@ describe("claudecode.terminal (wrapper for Snacks.nvim)", function()
         custom_provider.hide_session:was_called(2)
         custom_provider.simple_toggle:was_not_called()
         custom_provider.focus_toggle:was_not_called()
+      end)
+
+      describe("several sessions in one tab", function()
+        local session_manager
+        local tab_registry
+        local visible -- session_id -> winid for the fake window-owning provider
+        local next_win
+
+        local function base_provider()
+          return {
+            setup = spy.new(function() end),
+            open = spy.new(function() end),
+            close = spy.new(function() end),
+            simple_toggle = spy.new(function() end),
+            focus_toggle = spy.new(function() end),
+            get_active_bufnr = spy.new(function()
+              return nil
+            end),
+            is_available = spy.new(function()
+              return true
+            end),
+          }
+        end
+
+        -- Models Snacks: each session owns a window; showing one parks the rest.
+        local function window_owning_provider()
+          local p = base_provider()
+          local function show_only(sid)
+            for k in pairs(visible) do
+              visible[k] = nil
+            end
+            next_win = next_win + 1
+            visible[sid] = next_win
+          end
+          p.open_session = spy.new(function(sid)
+            show_only(sid)
+          end)
+          p.close_session_keep_window = spy.new(function(_, new_sid)
+            show_only(new_sid)
+          end)
+          p.close_session = spy.new(function(sid)
+            visible[sid] = nil
+          end)
+          p.focus_session = spy.new(function(sid)
+            show_only(sid)
+          end)
+          p.get_session_window = function(sid)
+            return visible[sid]
+          end
+          p.hide_session = spy.new(function(sid)
+            visible[sid] = nil
+          end)
+          return p
+        end
+
+        local function visible_ids()
+          local ids = {}
+          for sid in pairs(visible) do
+            table.insert(ids, sid)
+          end
+          return ids
+        end
+
+        before_each(function()
+          session_manager = require("claudecode.session")
+          tab_registry = require("claudecode.tab_registry")
+          session_manager.reset()
+          tab_registry.reset()
+          visible = {}
+          next_win = 5000
+        end)
+
+        after_each(function()
+          session_manager.reset()
+          tab_registry.reset()
+        end)
+
+        it("closing the active of three sessions keeps the tab pointer on the shown session", function()
+          local provider = window_owning_provider()
+          terminal_wrapper.setup({ provider = provider })
+          terminal_wrapper.open_new_session()
+          terminal_wrapper.open_new_session()
+          local s3 = terminal_wrapper.open_new_session()
+
+          terminal_wrapper.close_session(s3)
+          local shown = visible_ids()
+          assert.are.equal(1, #shown)
+          -- The tab's active pointer follows the session that was unparked.
+          assert.are.equal(shown[1], session_manager.get_active_session_id())
+
+          provider.open_session:clear()
+          -- ensure_visible (send/diff paths) must leave the visible session alone.
+          terminal_wrapper.ensure_visible()
+          provider.open_session:was_not_called()
+          assert.is_not_nil(visible[shown[1]])
+
+          -- :ClaudeCode hides the visible session instead of swapping sessions.
+          terminal_wrapper.simple_toggle()
+          provider.hide_session:was_called_with(shown[1])
+          provider.open_session:was_not_called()
+          assert.are.equal(0, #visible_ids())
+        end)
+
+        it("hides the visible session even when the tab pointer names a parked one", function()
+          local provider = window_owning_provider()
+          terminal_wrapper.setup({ provider = provider })
+          local s1 = terminal_wrapper.open_new_session()
+          terminal_wrapper.open_new_session()
+          local s3 = terminal_wrapper.open_new_session()
+          assert.is_not_nil(visible[s3])
+
+          -- Stale pointer: the registry names s1 while s3 is on screen.
+          tab_registry.set_active(s1)
+          provider.open_session:clear()
+
+          terminal_wrapper.ensure_visible()
+          provider.open_session:was_not_called()
+          assert.is_not_nil(visible[s3])
+
+          terminal_wrapper.simple_toggle()
+          provider.hide_session:was_called_with(s3)
+          provider.open_session:was_not_called()
+          assert.is_nil(visible[s1])
+        end)
+
+        it("simple_toggle shows a window_manager provider's session focused (native)", function()
+          local provider = base_provider()
+          provider.open_session = spy.new(function() end)
+          terminal_wrapper.setup({ provider = provider })
+          local sid = terminal_wrapper.open_new_session()
+          provider.open_session:clear()
+
+          -- No managed window is visible, so the toggle shows the tab's session.
+          terminal_wrapper.simple_toggle()
+          provider.open_session:was_called(1)
+          assert.are.equal(sid, provider.open_session:get_call(1).refs[1])
+          assert.is_true(provider.open_session:get_call(1).refs[5])
+        end)
+
+        it("ensure_visible re-shows a live but hidden native session without focus", function()
+          local provider = base_provider()
+          provider.open_session = spy.new(function() end)
+          terminal_wrapper.setup({ provider = provider })
+          local sid = terminal_wrapper.open_new_session()
+          local bufnr = vim.api.nvim_create_buf(false, true)
+          session_manager.update_terminal_info(sid, { bufnr = bufnr })
+          provider.open_session:clear()
+
+          -- Buffer alive, managed window closed (e.g. hidden by a toggle).
+          terminal_wrapper.ensure_visible()
+          provider.open_session:was_called(1)
+          assert.are.equal(sid, provider.open_session:get_call(1).refs[1])
+          assert.is_false(provider.open_session:get_call(1).refs[5])
+        end)
       end)
 
       it("should handle toggle function (legacy) correctly", function()

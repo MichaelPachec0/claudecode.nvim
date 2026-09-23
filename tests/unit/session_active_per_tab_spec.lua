@@ -49,6 +49,21 @@ describe("Session Manager per-tab active routing", function()
     expect(session_manager.get_active_session_id()).to_be(sid_b)
   end)
 
+  it("set_active_session moves the owning tab's active pointer", function()
+    local sid_a = session_manager.create_session({ name = "A" })
+    local sid_b = session_manager.create_session({ name = "B" })
+    local sid_c = session_manager.create_session({ name = "C" })
+    tab_registry.bind(1, sid_a)
+    tab_registry.bind(1, sid_b)
+    tab_registry.bind(1, sid_c)
+
+    current_tab = 1
+    expect(session_manager.get_active_session_id()).to_be(sid_c)
+    session_manager.set_active_session(sid_a)
+    expect(tab_registry.session_for_tab(1)).to_be(sid_a)
+    expect(session_manager.get_active_session_id()).to_be(sid_a)
+  end)
+
   it("falls back to the global active session when current tab has no binding", function()
     local sid = session_manager.create_session({ name = "Solo" })
     -- No tab binding at all

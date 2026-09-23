@@ -421,6 +421,42 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
     assert.is_false(windows[s1_win].config.hide == true) -- s1 visible again
   end)
 
+  it("unparking a session with focus enters insert mode unless auto_insert is false", function()
+    local cmds = {}
+    local orig_cmd = vim.cmd
+    vim.cmd = function(c)
+      table.insert(cmds, tostring(c))
+      return orig_cmd(c)
+    end
+    local function has_startinsert()
+      for _, c in ipairs(cmds) do
+        if c == "startinsert" then
+          return true
+        end
+      end
+      return false
+    end
+
+    local cfg = float_config()
+    snacks_provider.open_session("s1", "claude", {}, cfg, true)
+    local win = snacks_provider.get_session_window("s1")
+    snacks_provider.hide_session("s1")
+    assert.is_nil(snacks_provider.get_session_window("s1"))
+
+    cmds = {}
+    snacks_provider.open_session("s1", "claude", {}, cfg, true)
+    assert.are.equal(win, snacks_provider.get_session_window("s1"))
+    assert.are.equal(win, current_win)
+    assert.is_true(has_startinsert())
+
+    snacks_provider.hide_session("s1")
+    cfg.auto_insert = false
+    cmds = {}
+    snacks_provider.open_session("s1", "claude", {}, cfg, true)
+    assert.are.equal(win, current_win) -- still focused
+    assert.is_false(has_startinsert())
+  end)
+
   it("patches every session instance (hide keeps the process)", function()
     snacks_provider.open_session("s1", "claude", {}, split_config(), true)
     snacks_provider.simple_toggle("claude", {}, split_config())

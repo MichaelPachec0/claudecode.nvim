@@ -118,6 +118,38 @@ local function current_tab_has_live_terminal()
   return sess ~= nil and sess.terminal_bufnr ~= nil and vim.api.nvim_buf_is_valid(sess.terminal_bufnr)
 end
 
+---For a provider that owns its session windows (exposes get_session_window,
+---e.g. Snacks park/unpark), find the current tab's session that is actually on
+---screen. Every session the tab owns is checked, not only the tab's active
+---pointer: that pointer can name a parked session (e.g. after a session close
+---promoted another one), and trusting it would swap sessions instead of
+---hiding the visible one.
+---@param provider table The terminal provider module
+---@return string|nil session_id, number|nil winid
+local function visible_tab_session(provider)
+  if not provider.get_session_window then
+    return nil, nil
+  end
+  local ok, tab = pcall(vim.api.nvim_get_current_tabpage)
+  if not ok or not tab then
+    return nil, nil
+  end
+  local active = tab_registry.session_for_tab(tab)
+  if active then
+    local win = provider.get_session_window(active)
+    if win then
+      return active, win
+    end
+  end
+  for _, sid in ipairs(tab_registry.sessions_for_tab(tab)) do
+    local win = provider.get_session_window(sid)
+    if win then
+      return sid, win
+    end
+  end
+  return nil, nil
+end
+
 ---Wire up the auxiliary state for a freshly-spawned session terminal: tab bind,
 ---buffer→session map, terminal_info on the session, OSC title watcher, provider
 ---registration. Returns the session id.
@@ -1137,13 +1169,15 @@ local function ensure_terminal_visible_no_focus(opts_override, cmd_args)
   local cmd_string, claude_env_table = get_claude_command_and_env(cmd_args)
 
   if provider.open_session then
-    -- Per-tab path. A provider that owns its windows can have a live but
-    -- parked terminal (e.g. a config-hidden Snacks float); re-show it then.
-    if current_tab_has_live_terminal() then
-      local tab_sid = current_tab_session()
-      if not provider.get_session_window or provider.get_session_window(tab_sid) then
+    -- Per-tab path. A live terminal can still be hidden (native: managed
+    -- window closed by a toggle; Snacks: parked float or closed split). Only
+    -- skip when it is actually on screen; otherwise re-show it without focus.
+    if provider.get_session_window then
+      if visible_tab_session(provider) then
         return true
       end
+    elseif current_tab_has_live_terminal() and require("claudecode.terminal.window_manager").is_visible() then
+      return true
     end
     local session_id, newly_created = ensure_current_tab_session()
     provider.open_session(session_id, cmd_string, claude_env_table, effective_config, false)
@@ -1540,9 +1574,9 @@ function M.simple_toggle(opts_override, cmd_args)
     if provider.hide_session then
       -- Provider owns its windows (Snacks park/unpark): hide through it so a
       -- float is config-hidden rather than destroyed (climbing cursor, #271).
-      local tab_sid = current_tab_session()
-      if tab_sid and provider.get_session_window(tab_sid) then
-        provider.hide_session(tab_sid)
+      local visible_sid = visible_tab_session(provider)
+      if visible_sid then
+        provider.hide_session(visible_sid)
         detach_tabbar()
         return
       end
@@ -1556,8 +1590,10 @@ function M.simple_toggle(opts_override, cmd_args)
       end
     end
 
+    -- Upstream semantics: showing (or creating) the terminal focuses it; the
+    -- provider enters insert mode unless terminal.auto_insert is false.
     local session_id, newly_created = ensure_current_tab_session()
-    provider.open_session(session_id, cmd_string, claude_env_table, effective_config, false)
+    provider.open_session(session_id, cmd_string, claude_env_table, effective_config, true)
     if newly_created then
       finalize_session_terminal(session_id, provider.get_active_bufnr(), provider)
     end
@@ -1612,15 +1648,19 @@ function M.focus_toggle(opts_override, cmd_args)
   local provider = get_provider()
 
   if provider.open_session then
+    local session_id, newly_created
     if provider.hide_session then
       -- Provider owns its windows (Snacks park/unpark). Focused -> park it;
-      -- visible but unfocused -> open_session below focuses it via the provider.
-      local tab_sid = current_tab_session()
-      local winid = tab_sid and provider.get_session_window(tab_sid)
-      if winid and winid == vim.api.nvim_get_current_win() then
-        provider.hide_session(tab_sid)
+      -- visible but unfocused -> open_session below focuses that session.
+      local visible_sid, winid = visible_tab_session(provider)
+      if visible_sid and winid == vim.api.nvim_get_current_win() then
+        provider.hide_session(visible_sid)
         detach_tabbar()
         return
+      end
+      if visible_sid then
+        session_id, newly_created = visible_sid, false
+        session_manager.set_active_session(visible_sid)
       end
     else
       local window_manager = require("claudecode.terminal.window_manager")
@@ -1635,13 +1675,17 @@ function M.focus_toggle(opts_override, cmd_args)
         end
         if winid then
           vim.api.nvim_set_current_win(winid)
-          pcall(vim.cmd, "startinsert")
+          if effective_config.auto_insert ~= false then
+            pcall(vim.cmd, "startinsert")
+          end
           return
         end
       end
     end
 
-    local session_id, newly_created = ensure_current_tab_session()
+    if not session_id then
+      session_id, newly_created = ensure_current_tab_session()
+    end
     provider.open_session(session_id, cmd_string, claude_env_table, effective_config, true)
     if newly_created then
       finalize_session_terminal(session_id, provider.get_active_bufnr(), provider)
