@@ -129,6 +129,12 @@ describe("claudecode.terminal.native toggle behavior", function()
         lines = 40,
       },
       fn = {
+        has = function(feature)
+          if feature == "nvim-0.10" then
+            return mock_state.has_nvim_010 == false and 0 or 1
+          end
+          return 0
+        end,
         termopen = function(cmd, opts)
           local jobid = mock_state.next_jobid
           mock_state.next_jobid = mock_state.next_jobid + 1
@@ -157,6 +163,23 @@ describe("claudecode.terminal.native toggle behavior", function()
       schedule = function(callback)
         callback() -- Execute immediately in tests
       end,
+      wo = setmetatable({}, {
+        __index = function(_, win)
+          return setmetatable({}, {
+            __newindex = function(_, option, value)
+              local w = mock_state.windows[win]
+              if w then
+                w.options = w.options or {}
+                w.options[option] = value
+              end
+            end,
+            __index = function(_, option)
+              local w = mock_state.windows[win]
+              return w and w.options and w.options[option]
+            end,
+          })
+        end,
+      }),
       bo = setmetatable({}, {
         __index = function(_, bufnr)
           return setmetatable({}, {
@@ -236,6 +259,30 @@ describe("claudecode.terminal.native toggle behavior", function()
 
       local mock_state = _G.get_mock_state()
       assert.are.equal("claudecode", mock_state.buffers[bufnr].options.filetype)
+    end)
+
+    it("should pin the terminal window and disable spell on open", function()
+      local config = { split_side = "right", split_width_percentage = 0.3 }
+
+      native_provider.open("claude", {}, config)
+
+      local mock_state = _G.get_mock_state()
+      local opts = mock_state.windows[mock_state.current_win].options
+      assert.is_true(opts.winfixwidth)
+      assert.is_true(opts.winfixbuf)
+      assert.is_false(opts.spell)
+    end)
+
+    it("should skip winfixbuf on Neovim < 0.10", function()
+      local mock_state = _G.get_mock_state()
+      mock_state.has_nvim_010 = false
+      local config = { split_side = "right", split_width_percentage = 0.3 }
+
+      native_provider.open("claude", {}, config)
+
+      local opts = mock_state.windows[mock_state.current_win].options
+      assert.is_true(opts.winfixwidth)
+      assert.is_nil(opts.winfixbuf)
     end)
   end)
 

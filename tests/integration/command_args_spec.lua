@@ -103,6 +103,12 @@ describe("ClaudeCode command arguments integration", function()
       end,
       __newindex = function() end,
     })
+    vim.wo = setmetatable({}, {
+      __index = function()
+        return {}
+      end,
+      __newindex = function() end,
+    })
     vim.schedule = function(func)
       func()
     end
