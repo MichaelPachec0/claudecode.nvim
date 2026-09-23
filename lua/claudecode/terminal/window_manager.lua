@@ -346,7 +346,9 @@ function M.display_buffer(bufnr, focus)
   -- Focus if requested
   if focus then
     vim.api.nvim_set_current_win(winid)
-    vim.cmd("startinsert")
+    if (state.config or {}).auto_insert ~= false then
+      vim.cmd("startinsert")
+    end
   end
 
   logger.debug("window_manager", "Displayed buffer " .. bufnr .. " in window " .. winid)

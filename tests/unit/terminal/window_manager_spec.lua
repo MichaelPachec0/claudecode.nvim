@@ -963,6 +963,38 @@ describe("claudecode.terminal.window_manager", function()
       end
       assert.is_true(saw_startinsert)
     end)
+
+    it("does not startinsert when auto_insert = false", function()
+      mock_vim.api.nvim_buf_is_valid = spy.new(function()
+        return true
+      end)
+      mock_vim.api.nvim_buf_get_name = spy.new(function()
+        return ""
+      end)
+      mock_vim.api.nvim_win_set_buf = spy.new(function() end)
+      mock_vim.api.nvim_set_current_win = spy.new(function() end)
+      mock_vim.bo = setmetatable({}, {
+        __index = function()
+          return { channel = 123, buftype = "" }
+        end,
+      })
+
+      window_manager.setup({ split_side = "right", split_width_percentage = 0.3, auto_insert = false })
+      window_manager.ensure_window()
+
+      local ok = window_manager.display_buffer(7, true)
+
+      assert.is_true(ok)
+      assert.spy(mock_vim.api.nvim_set_current_win).was_called()
+
+      local saw_startinsert = false
+      for _, call in ipairs(mock_vim.cmd.calls) do
+        if call.vals[1] == "startinsert" then
+          saw_startinsert = true
+        end
+      end
+      assert.is_false(saw_startinsert)
+    end)
   end)
 
   describe("manual resize persistence (D4: no auto-restore on VimResized/TabEnter)", function()

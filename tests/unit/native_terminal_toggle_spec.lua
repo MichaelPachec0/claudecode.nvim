@@ -2,132 +2,164 @@ describe("claudecode.terminal.native toggle behavior", function()
   local native_provider
   local mock_vim
   local logger_spy
+  local mock_state
 
   before_each(function()
     -- Set up the package path for tests
     package.path = "./lua/?.lua;" .. package.path
 
-    -- Clean up any loaded modules
+    -- Clean up any loaded modules. "claudecode.terminal.native" pulls in
+    -- claudecode.session and claudecode.terminal.window_manager (real modules,
+    -- fresh each test) plus claudecode.terminal (stubbed below, since the real
+    -- module also boots the websocket server and is out of scope for this
+    -- unit-level provider test).
     package.loaded["claudecode.terminal.native"] = nil
+    package.loaded["claudecode.terminal.window_manager"] = nil
+    package.loaded["claudecode.terminal.osc_handler"] = nil
+    package.loaded["claudecode.terminal.tabbar"] = nil
+    package.loaded["claudecode.session"] = nil
+    package.loaded["claudecode.tab_registry"] = nil
+    package.loaded["claudecode.utils"] = nil
     package.loaded["claudecode.logger"] = nil
+    package.loaded["claudecode.terminal"] = nil
 
-    -- Mock state for more realistic testing
-    local mock_state = {
+    -- Mock state: buffers/windows are a single tabpage (tabpage handle 1).
+    mock_state = {
       buffers = {},
       windows = {},
-      current_win = 1,
+      current_win = nil,
+      current_buf_context = nil, -- bufnr currently inside nvim_buf_call
       next_bufnr = 1,
       next_winid = 1000,
       next_jobid = 10000,
-      buffer_options = {},
+      job_exit_callbacks = {}, -- jobid -> on_exit callback
+      termopen_calls = {},
     }
 
-    -- Mock vim API with stateful behavior
+    -- Mock vim API with stateful behavior matching the window-less native
+    -- provider (PR #164): providers create buffers via nvim_create_buf and
+    -- run termopen inside nvim_buf_call; window_manager.display_buffer puts
+    -- the buffer in the single managed window.
     mock_vim = {
       api = {
+        nvim_create_buf = function(listed, scratch)
+          local bufnr = mock_state.next_bufnr
+          mock_state.next_bufnr = bufnr + 1
+          mock_state.buffers[bufnr] = {
+            name = "",
+            -- channel defaults to 0 (no attached job yet) so window_manager's
+            -- `chan and chan > 0` resize check never compares against the
+            -- generic "" fallback used for unset string options below.
+            options = { channel = 0 },
+            vars = {},
+            listed = listed,
+            scratch = scratch,
+          }
+          return bufnr
+        end,
         nvim_buf_is_valid = function(bufnr)
           return mock_state.buffers[bufnr] ~= nil
+        end,
+        nvim_buf_delete = function(bufnr, _)
+          mock_state.buffers[bufnr] = nil
+        end,
+        nvim_buf_call = function(bufnr, fn)
+          local prev = mock_state.current_buf_context
+          mock_state.current_buf_context = bufnr
+          local ok, result = pcall(fn)
+          mock_state.current_buf_context = prev
+          if not ok then
+            error(result, 0)
+          end
+          return result
+        end,
+        nvim_buf_get_var = function(bufnr, name)
+          local buf = mock_state.buffers[bufnr]
+          return buf and buf.vars and buf.vars[name]
+        end,
+        nvim_buf_set_var = function(bufnr, name, value)
+          local buf = mock_state.buffers[bufnr]
+          if buf then
+            buf.vars = buf.vars or {}
+            buf.vars[name] = value
+          end
+        end,
+        nvim_buf_get_name = function(bufnr)
+          local buf = mock_state.buffers[bufnr]
+          return buf and buf.name or ""
         end,
         nvim_win_is_valid = function(winid)
           return mock_state.windows[winid] ~= nil
         end,
-        nvim_list_wins = function()
+        nvim_win_get_buf = function(winid)
+          local win = mock_state.windows[winid]
+          return win and win.bufnr or 0
+        end,
+        nvim_win_get_tabpage = function(_)
+          return 1
+        end,
+        nvim_win_get_width = function(_)
+          return 80
+        end,
+        nvim_win_get_height = function(_)
+          return 24
+        end,
+        nvim_win_set_height = function(_, _) end,
+        nvim_win_set_width = function(_, _) end,
+        nvim_win_close = function(winid, _)
+          mock_state.windows[winid] = nil
+          if mock_state.current_win == winid then
+            mock_state.current_win = nil
+          end
+        end,
+        nvim_win_set_buf = function(winid, bufnr)
+          local win = mock_state.windows[winid]
+          if win then
+            win.bufnr = bufnr
+          end
+        end,
+        nvim_get_current_tabpage = function()
+          return 1
+        end,
+        nvim_tabpage_list_wins = function(_)
           local wins = {}
           for winid, _ in pairs(mock_state.windows) do
             table.insert(wins, winid)
           end
           return wins
         end,
-        nvim_list_bufs = function()
-          local bufs = {}
-          for bufnr, _ in pairs(mock_state.buffers) do
-            table.insert(bufs, bufnr)
-          end
-          return bufs
-        end,
-        nvim_buf_get_name = function(bufnr)
-          local buf = mock_state.buffers[bufnr]
-          return buf and buf.name or ""
-        end,
-        nvim_buf_get_option = function(bufnr, option)
-          local buf = mock_state.buffers[bufnr]
-          if buf and buf.options and buf.options[option] then
-            return buf.options[option]
-          end
-          return ""
-        end,
-        nvim_buf_set_option = function(bufnr, option, value)
-          local buf = mock_state.buffers[bufnr]
-          if buf then
-            buf.options = buf.options or {}
-            buf.options[option] = value
-            -- Track calls for verification
-            mock_state.buffer_options[bufnr] = mock_state.buffer_options[bufnr] or {}
-            mock_state.buffer_options[bufnr][option] = value
-          end
-        end,
-        nvim_win_get_buf = function(winid)
-          local win = mock_state.windows[winid]
-          return win and win.bufnr or 0
-        end,
-        nvim_win_close = function(winid, force)
-          -- Remove window from state (simulates window closing)
-          if winid and mock_state.windows[winid] then
-            mock_state.windows[winid] = nil
-          end
+        nvim_tabpage_is_valid = function(_)
+          return true
         end,
         nvim_get_current_win = function()
           return mock_state.current_win
-        end,
-        nvim_get_current_buf = function()
-          local current_win = mock_state.current_win
-          local win = mock_state.windows[current_win]
-          return win and win.bufnr or 0
         end,
         nvim_set_current_win = function(winid)
           if mock_state.windows[winid] then
             mock_state.current_win = winid
           end
         end,
-        nvim_win_set_buf = function(winid, bufnr)
-          local win = mock_state.windows[winid]
-          if win and mock_state.buffers[bufnr] then
-            win.bufnr = bufnr
-          end
+        nvim_create_augroup = function(_, _)
+          return 1
         end,
-        nvim_win_set_height = function(winid, height)
-          -- Mock window resizing
-        end,
-        nvim_win_set_width = function(winid, width)
-          -- Mock window resizing
-        end,
-        nvim_win_call = function(winid, fn)
-          -- Mock window-specific function execution
-          return fn()
-        end,
+        nvim_create_autocmd = function(_, _) end,
+        nvim_del_augroup_by_id = function(_) end,
+        nvim_exec_autocmds = function(_, _) end,
+        nvim_feedkeys = function(_, _, _) end,
       },
       cmd = function(command)
-        -- Handle vsplit/split and other commands
         if
-          command:match("^topleft %d+vsplit")
-          or command:match("^botright %d+vsplit")
-          or command:match("^topleft %d+split")
-          or command:match("^botright %d+split")
+          command == "topleft new"
+          or command == "botright new"
+          or command == "topleft vertical new"
+          or command == "botright vertical new"
         then
-          -- Create new window
           local winid = mock_state.next_winid
-          mock_state.next_winid = mock_state.next_winid + 1
+          mock_state.next_winid = winid + 1
           mock_state.windows[winid] = { bufnr = 0 }
           mock_state.current_win = winid
-        elseif command == "enew" then
-          -- Create new buffer in current window
-          local bufnr = mock_state.next_bufnr
-          mock_state.next_bufnr = mock_state.next_bufnr + 1
-          mock_state.buffers[bufnr] = { name = "", options = {} }
-          if mock_state.windows[mock_state.current_win] then
-            mock_state.windows[mock_state.current_win].bufnr = bufnr
-          end
         end
+        -- "startinsert" and any other command are recorded but not simulated.
       end,
       o = {
         columns = 120,
@@ -140,34 +172,46 @@ describe("claudecode.terminal.native toggle behavior", function()
           end
           return 0
         end,
+        jobresize = function(_, _, _) end,
+        jobpid = function(jobid)
+          return 100000 + jobid
+        end,
+        system = function(_) end,
         termopen = function(cmd, opts)
           local jobid = mock_state.next_jobid
-          mock_state.next_jobid = mock_state.next_jobid + 1
+          mock_state.next_jobid = jobid + 1
 
-          -- Create terminal buffer
-          local bufnr = mock_state.next_bufnr
-          mock_state.next_bufnr = mock_state.next_bufnr + 1
-          mock_state.buffers[bufnr] = {
-            name = "term://claude",
-            options = { buftype = "terminal", bufhidden = "wipe" },
-            jobid = jobid,
-            on_exit = opts.on_exit,
-          }
-
-          -- Set buffer in current window
-          if mock_state.windows[mock_state.current_win] then
-            mock_state.windows[mock_state.current_win].bufnr = bufnr
+          local target_buf = mock_state.current_buf_context
+          if target_buf and mock_state.buffers[target_buf] then
+            mock_state.buffers[target_buf].options.buftype = "terminal"
+            mock_state.buffers[target_buf].options.channel = jobid
           end
 
+          mock_state.job_exit_callbacks[jobid] = opts and opts.on_exit
+          table.insert(mock_state.termopen_calls, { cmd = cmd, opts = opts, jobid = jobid })
+
           return jobid
+        end,
+        jobstop = function(jobid)
+          local callback = mock_state.job_exit_callbacks[jobid]
+          if callback then
+            mock_state.job_exit_callbacks[jobid] = nil
+            callback(jobid, 0, "exit")
+          end
+          return 1
         end,
       },
       keymap = {
         set = function() end,
       },
+      notify = function() end,
       schedule = function(callback)
         callback() -- Execute immediately in tests
       end,
+      defer_fn = function(callback)
+        callback() -- Execute immediately in tests
+      end,
+      log = { levels = { INFO = 1, WARN = 2, ERROR = 3 } },
       wo = setmetatable({}, {
         __index = function(_, win)
           return setmetatable({}, {
@@ -189,7 +233,6 @@ describe("claudecode.terminal.native toggle behavior", function()
         __index = function(_, bufnr)
           return setmetatable({}, {
             __newindex = function(_, option, value)
-              -- Mock buffer option setting
               local buf = mock_state.buffers[bufnr]
               if buf then
                 buf.options = buf.options or {}
@@ -203,19 +246,44 @@ describe("claudecode.terminal.native toggle behavior", function()
           })
         end,
       }),
+      b = setmetatable({}, {
+        __index = function(_, bufnr)
+          local buf = mock_state.buffers[bufnr]
+          if not buf then
+            return {}
+          end
+          buf.vars = buf.vars or {}
+          return buf.vars
+        end,
+        __newindex = function(_, bufnr, vars)
+          local buf = mock_state.buffers[bufnr]
+          if buf then
+            buf.vars = vars
+          end
+        end,
+      }),
     }
     _G.vim = mock_vim
 
     -- Mock logger
     logger_spy = {
-      debug = function(module, message, ...)
-        -- Track debug calls for verification
-      end,
-      error = function(module, message, ...)
-        -- Track error calls
-      end,
+      debug = function(module, message, ...) end,
+      warn = function(module, message, ...) end,
+      error = function(module, message, ...) end,
     }
     package.loaded["claudecode.logger"] = logger_spy
+
+    -- Stub the parent "claudecode.terminal" module. The real module also
+    -- boots the websocket server and a raft of other subsystems at require
+    -- time; native.lua only needs these few entry points from it.
+    package.loaded["claudecode.terminal"] = {
+      defaults = { show_native_term_exit_tip = false, auto_insert = true },
+      setup_scroll_keymaps = function() end,
+      setup_terminal_keymaps = function() end,
+      register_buffer_session = function() end,
+      update_session_terminal_info = function() end,
+      track_terminal_pid = function() end,
+    }
 
     -- Load the native provider
     native_provider = require("claudecode.terminal.native")
@@ -229,13 +297,19 @@ describe("claudecode.terminal.native toggle behavior", function()
 
   after_each(function()
     _G.vim = nil
+    _G.get_mock_state = nil
     package.loaded["claudecode.terminal.native"] = nil
+    package.loaded["claudecode.terminal.window_manager"] = nil
+    package.loaded["claudecode.terminal.osc_handler"] = nil
+    package.loaded["claudecode.terminal.tabbar"] = nil
+    package.loaded["claudecode.session"] = nil
+    package.loaded["claudecode.tab_registry"] = nil
+    package.loaded["claudecode.terminal"] = nil
     package.loaded["claudecode.logger"] = nil
   end)
 
   describe("toggle with no existing terminal", function()
     it("should create a new terminal when none exists", function()
-      pending("re-ported in Task 5: native terminal buffer creation via parse_command argv")
       local cmd_string = "claude"
       local env_table = { TEST = "value" }
       local config = { split_side = "right", split_width_percentage = 0.3 }
@@ -253,8 +327,37 @@ describe("claudecode.terminal.native toggle behavior", function()
       assert.is_not_nil(native_provider.get_active_bufnr())
     end)
 
+    it("passes a bracketed model alias as one argv element", function()
+      local env_table = {}
+      local config = { split_side = "right", split_width_percentage = 0.3 }
+      local captured_cmd
+
+      mock_vim.fn.termopen = function(cmd, opts)
+        captured_cmd = cmd
+        return 12345
+      end
+
+      native_provider.open("claude --model opus[1m]", env_table, config)
+
+      assert.are.same({ "claude", "--model", "opus[1m]" }, captured_cmd)
+    end)
+
+    it("keeps quoted arguments intact", function()
+      local env_table = {}
+      local config = { split_side = "right", split_width_percentage = 0.3 }
+      local captured_cmd
+
+      mock_vim.fn.termopen = function(cmd, opts)
+        captured_cmd = cmd
+        return 12345
+      end
+
+      native_provider.open([[claude --append-system-prompt "be brief"]], env_table, config)
+
+      assert.are.same({ "claude", "--append-system-prompt", "be brief" }, captured_cmd)
+    end)
+
     it("should set filetype to claudecode on the terminal buffer", function()
-      pending("re-ported in Task 5: filetype claudecode on the native terminal buffer")
       local cmd_string = "claude"
       local env_table = { TEST = "value" }
       local config = { split_side = "right", split_width_percentage = 0.3 }
@@ -264,8 +367,22 @@ describe("claudecode.terminal.native toggle behavior", function()
       local bufnr = native_provider.get_active_bufnr()
       assert.is_not_nil(bufnr)
 
-      local mock_state = _G.get_mock_state()
-      assert.are.equal("claudecode", mock_state.buffers[bufnr].options.filetype)
+      local state = _G.get_mock_state()
+      assert.are.equal("claudecode", state.buffers[bufnr].options.filetype)
+    end)
+
+    it("sets bufhidden to hide on the terminal buffer", function()
+      local cmd_string = "claude"
+      local env_table = { TEST = "value" }
+      local config = { split_side = "right", split_width_percentage = 0.3 }
+
+      native_provider.open(cmd_string, env_table, config)
+
+      local bufnr = native_provider.get_active_bufnr()
+      assert.is_not_nil(bufnr)
+
+      local state = _G.get_mock_state()
+      assert.are.equal("hide", state.buffers[bufnr].options.bufhidden)
     end)
 
     -- Window pinning (winfixwidth/winfixheight/winfixbuf, nospell) is owned by
@@ -292,27 +409,32 @@ describe("claudecode.terminal.native toggle behavior", function()
       local initial_bufnr = native_provider.get_active_bufnr()
       assert.is_not_nil(initial_bufnr)
 
-      local mock_state = _G.get_mock_state()
+      local state = _G.get_mock_state()
 
       -- Find the terminal window
       local terminal_winid = nil
-      for winid, win in pairs(mock_state.windows) do
+      for winid, win in pairs(state.windows) do
         if win.bufnr == initial_bufnr then
           terminal_winid = winid
           break
         end
       end
+      assert.is_not_nil(terminal_winid)
 
       -- Mock being in terminal window
-      mock_state.current_win = terminal_winid
+      state.current_win = terminal_winid
 
       -- Toggle should hide but preserve process
       native_provider.toggle(cmd_string, env_table, config)
       assert.are.equal(initial_bufnr, native_provider.get_active_bufnr())
 
-      -- Close should kill the process (cleanup_state called)
+      -- Job must still be running (on_exit not fired yet)
+      assert.is_not_nil(next(state.job_exit_callbacks))
+
+      -- Close should kill the process (jobstop) and clean up via the on_exit handler
       native_provider.close()
       assert.is_nil(native_provider.get_active_bufnr())
+      assert.is_nil(next(state.job_exit_callbacks))
     end)
   end)
 
@@ -324,7 +446,6 @@ describe("claudecode.terminal.native toggle behavior", function()
     -- when the previous one was closed externally").
 
     it("should always show terminal when not visible", function()
-      pending("re-ported in Task 5: native terminal buffer creation via parse_command argv")
       local cmd_string = "claude"
       local env_table = { TEST = "value" }
       local config = { split_side = "right", split_width_percentage = 0.3 }

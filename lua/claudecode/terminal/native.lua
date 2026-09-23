@@ -60,10 +60,21 @@ local function create_terminal_buffer(cmd_string, env_table, effective_config, s
   vim.b[new_bufnr].claudecode_terminal = true
 
   vim.bo[new_bufnr].bufhidden = "hide"
+  vim.bo[new_bufnr].filetype = "claudecode"
 
   -- Set up scroll keymaps (scroll up to view scrollback by default)
   local terminal_module = require("claudecode.terminal")
   terminal_module.setup_scroll_keymaps(new_bufnr, effective_config)
+
+  -- #203: Shift-Enter inserts a newline instead of submitting, by feeding a
+  -- backslash-escaped newline (the same sequence Claude's own line-continuation
+  -- convention expects) into the terminal's pty.
+  vim.keymap.set("t", "<S-CR>", function()
+    vim.api.nvim_feedkeys("\\", "t", true)
+    vim.defer_fn(function()
+      vim.api.nvim_feedkeys("\r", "t", true)
+    end, 10)
+  end, { buffer = new_bufnr, desc = "New line" })
 
   -- Set up BufUnload autocmd to ensure job is stopped when buffer is deleted
   -- This catches :bd!, Neovim exit, and any other buffer deletion path
@@ -86,12 +97,7 @@ local function create_terminal_buffer(cmd_string, env_table, effective_config, s
     end,
   })
 
-  local term_cmd_arg
-  if cmd_string:find(" ", 1, true) then
-    term_cmd_arg = vim.split(cmd_string, " ", { plain = true, trimempty = false })
-  else
-    term_cmd_arg = { cmd_string }
-  end
+  local term_cmd_arg = utils.parse_command(cmd_string)
 
   -- Open terminal in the buffer
   local new_jobid
@@ -368,7 +374,9 @@ function M.focus_toggle(cmd_string, env_table, effective_config)
       -- Terminal visible but not focused, focus it
       logger.debug("terminal", "Focus toggle: focusing terminal")
       vim.api.nvim_set_current_win(winid)
-      vim.cmd("startinsert")
+      if effective_config.auto_insert ~= false then
+        vim.cmd("startinsert")
+      end
     end
   end
 end

@@ -1454,6 +1454,7 @@ function M.setup(user_term_config, p_terminal_cmd, p_env)
   window_manager.setup({
     split_side = defaults.split_side,
     split_width_percentage = defaults.split_width_percentage,
+    auto_insert = defaults.auto_insert,
   })
 
   -- Setup providers with config
