@@ -41,6 +41,12 @@ describe("claudecode.terminal.window_manager", function()
       }),
       fn = {
         jobresize = spy.new(function() end),
+        has = spy.new(function(feature)
+          if feature == "nvim-0.10" then
+            return 1
+          end
+          return 0
+        end),
       },
       defer_fn = spy.new(function(fn, delay)
         fn()
@@ -319,49 +325,6 @@ describe("claudecode.terminal.window_manager", function()
   end)
 
   describe("VimResized autocommand callback", function()
-    it("should restore configured width on VimResized event", function()
-      mock_vim.o = { columns = 200 }
-      mock_vim.wo = setmetatable({}, {
-        __index = function()
-          return {}
-        end,
-        __newindex = function() end,
-      })
-      mock_vim.cmd = spy.new(function() end)
-      mock_vim.api.nvim_win_set_width = spy.new(function() end)
-      mock_vim.api.nvim_tabpage_list_wins = spy.new(function()
-        return {}
-      end)
-      mock_vim.api.nvim_get_current_tabpage = spy.new(function()
-        return 1
-      end)
-
-      window_manager.setup({ split_width_percentage = 0.3 })
-
-      -- Create a window first
-      window_manager.ensure_window()
-
-      -- Find and call the VimResized callback
-      local vim_resized_callback
-      for _, call in ipairs(mock_vim.api.nvim_create_autocmd.calls) do
-        if call.vals[1] == "VimResized" then
-          vim_resized_callback = call.vals[2].callback
-          break
-        end
-      end
-
-      assert.is_function(vim_resized_callback)
-
-      -- Simulate terminal resize: columns changed to 300
-      mock_vim.o = { columns = 300 }
-      mock_vim.api.nvim_win_set_width = spy.new(function() end)
-
-      vim_resized_callback()
-
-      -- Should restore width: 300 * 0.3 = 90
-      assert.spy(mock_vim.api.nvim_win_set_width).was_called()
-    end)
-
     it("should call notify_resize on VimResized event", function()
       -- Mock additional APIs needed for window creation
       mock_vim.o = { columns = 200 }
@@ -712,131 +675,6 @@ describe("claudecode.terminal.window_manager", function()
       assert.spy(mock_vim.fn.jobresize).was_called()
     end)
 
-    it("should restore configured width when switching tabs", function()
-      -- Mock additional APIs needed for window creation
-      mock_vim.o = { columns = 200 }
-      mock_vim.wo = setmetatable({}, {
-        __index = function()
-          return {}
-        end,
-        __newindex = function() end,
-      })
-      mock_vim.cmd = spy.new(function() end)
-      mock_vim.api.nvim_win_set_width = spy.new(function() end)
-      mock_vim.api.nvim_get_current_tabpage = spy.new(function()
-        return 1
-      end)
-
-      -- Mock find_terminal_window to return a terminal window in the new tab
-      local terminal_win_in_tab = 2000
-      mock_vim.api.nvim_tabpage_list_wins = spy.new(function()
-        return { terminal_win_in_tab }
-      end)
-      mock_vim.bo = setmetatable({}, {
-        __index = function(_, bufnr)
-          return { buftype = "terminal", channel = 123 }
-        end,
-      })
-      mock_vim.b = setmetatable({}, {
-        __index = function()
-          return { claudecode_terminal = true }
-        end,
-      })
-
-      window_manager.setup({ split_width_percentage = 0.35 })
-
-      -- Find the TabEnter callback
-      local tab_enter_callback
-      for _, call in ipairs(mock_vim.api.nvim_create_autocmd.calls) do
-        if call.vals[1] == "TabEnter" then
-          tab_enter_callback = call.vals[2].callback
-          break
-        end
-      end
-
-      assert.is_function(tab_enter_callback)
-
-      -- Mock the terminal window validation and dimensions
-      mock_vim.api.nvim_win_is_valid = spy.new(function(win)
-        return win == terminal_win_in_tab
-      end)
-      mock_vim.api.nvim_win_get_buf = spy.new(function()
-        return 1
-      end)
-
-      -- Reset spies
-      mock_vim.fn.jobresize = spy.new(function() end)
-      mock_vim.api.nvim_win_set_width = spy.new(function() end)
-      mock_vim.defer_fn = spy.new(function(fn, delay)
-        fn()
-      end)
-
-      -- Call the callback (simulating tab switch)
-      tab_enter_callback()
-
-      -- nvim_win_set_width should be called with configured percentage (200 * 0.35 = 70)
-      assert.spy(mock_vim.api.nvim_win_set_width).was_called_with(terminal_win_in_tab, 70)
-    end)
-
-    it("should use default 40% width when split_width_percentage not configured", function()
-      -- Mock additional APIs needed for window creation
-      mock_vim.o = { columns = 200 }
-      mock_vim.wo = setmetatable({}, {
-        __index = function()
-          return {}
-        end,
-        __newindex = function() end,
-      })
-      mock_vim.cmd = spy.new(function() end)
-      mock_vim.api.nvim_win_set_width = spy.new(function() end)
-      mock_vim.api.nvim_get_current_tabpage = spy.new(function()
-        return 1
-      end)
-
-      local terminal_win_in_tab = 2000
-      mock_vim.api.nvim_tabpage_list_wins = spy.new(function()
-        return { terminal_win_in_tab }
-      end)
-      mock_vim.bo = setmetatable({}, {
-        __index = function(_, bufnr)
-          return { buftype = "terminal", channel = 123 }
-        end,
-      })
-      mock_vim.b = setmetatable({}, {
-        __index = function()
-          return { claudecode_terminal = true }
-        end,
-      })
-
-      -- Setup with no split_width_percentage (should default to 0.4)
-      window_manager.setup({})
-
-      local tab_enter_callback
-      for _, call in ipairs(mock_vim.api.nvim_create_autocmd.calls) do
-        if call.vals[1] == "TabEnter" then
-          tab_enter_callback = call.vals[2].callback
-          break
-        end
-      end
-
-      mock_vim.api.nvim_win_is_valid = spy.new(function(win)
-        return win == terminal_win_in_tab
-      end)
-      mock_vim.api.nvim_win_get_buf = spy.new(function()
-        return 1
-      end)
-      mock_vim.fn.jobresize = spy.new(function() end)
-      mock_vim.api.nvim_win_set_width = spy.new(function() end)
-      mock_vim.defer_fn = spy.new(function(fn, delay)
-        fn()
-      end)
-
-      tab_enter_callback()
-
-      -- Should use default 40%: 200 * 0.4 = 80
-      assert.spy(mock_vim.api.nvim_win_set_width).was_called_with(terminal_win_in_tab, 80)
-    end)
-
     it("should not call notify_resize when no terminal window in new tab", function()
       -- Mock additional APIs
       mock_vim.o = { columns = 200 }
@@ -895,6 +733,254 @@ describe("claudecode.terminal.window_manager", function()
 
       -- jobresize should not be called
       assert.spy(mock_vim.fn.jobresize).was_not_called()
+    end)
+  end)
+
+  describe("split_side (top/bottom/left/right) and window pinning", function()
+    local win_options
+
+    before_each(function()
+      win_options = {}
+      mock_vim.o = { columns = 200, lines = 40 }
+      mock_vim.wo = setmetatable({}, {
+        __index = function(_, win)
+          win_options[win] = win_options[win] or {}
+          return setmetatable({}, {
+            __index = function(_, opt)
+              return win_options[win][opt]
+            end,
+            __newindex = function(_, opt, val)
+              win_options[win][opt] = val
+            end,
+          })
+        end,
+      })
+      mock_vim.cmd = spy.new(function() end)
+      mock_vim.fn.has = spy.new(function(feature)
+        if feature == "nvim-0.10" then
+          return 1
+        end
+        return 0
+      end)
+      mock_vim.api.nvim_win_set_width = spy.new(function() end)
+      mock_vim.api.nvim_win_set_height = spy.new(function() end)
+      mock_vim.api.nvim_tabpage_list_wins = spy.new(function()
+        return {}
+      end)
+      mock_vim.api.nvim_get_current_tabpage = spy.new(function()
+        return 1
+      end)
+    end)
+
+    it("creates a horizontal split sized by lines for split_side=bottom", function()
+      window_manager.setup({ split_side = "bottom", split_width_percentage = 0.3 })
+      local win = window_manager.ensure_window()
+
+      assert.spy(mock_vim.cmd).was_called_with("botright new")
+      assert.spy(mock_vim.api.nvim_win_set_height).was_called_with(win, 12)
+    end)
+
+    it("creates a horizontal split using topleft for split_side=top", function()
+      window_manager.setup({ split_side = "top", split_width_percentage = 0.3 })
+      local win = window_manager.ensure_window()
+
+      assert.spy(mock_vim.cmd).was_called_with("topleft new")
+      assert.spy(mock_vim.api.nvim_win_set_height).was_called_with(win, 12)
+    end)
+
+    it("creates a vertical split sized by columns for split_side=right", function()
+      window_manager.setup({ split_side = "right", split_width_percentage = 0.25 })
+      local win = window_manager.ensure_window()
+
+      assert.spy(mock_vim.cmd).was_called_with("botright vertical new")
+      assert.spy(mock_vim.api.nvim_win_set_width).was_called_with(win, 50)
+    end)
+
+    it("creates a vertical split using topleft for split_side=left", function()
+      window_manager.setup({ split_side = "left", split_width_percentage = 0.25 })
+      window_manager.ensure_window()
+
+      assert.spy(mock_vim.cmd).was_called_with("topleft vertical new")
+    end)
+
+    it("pins winfixwidth, disables spell, and sets winfixbuf for split_side=right on nvim-0.10+", function()
+      window_manager.setup({ split_side = "right", split_width_percentage = 0.3 })
+      local win = window_manager.ensure_window()
+
+      assert.is_true(win_options[win].winfixwidth)
+      assert.is_false(win_options[win].spell)
+      assert.is_true(win_options[win].winfixbuf)
+      assert.is_nil(win_options[win].winfixheight)
+    end)
+
+    it("pins winfixheight (not winfixwidth) for split_side=bottom", function()
+      window_manager.setup({ split_side = "bottom", split_width_percentage = 0.3 })
+      local win = window_manager.ensure_window()
+
+      assert.is_true(win_options[win].winfixheight)
+      assert.is_nil(win_options[win].winfixwidth)
+    end)
+
+    it("does not set winfixbuf on Neovim < 0.10", function()
+      mock_vim.fn.has = spy.new(function()
+        return 0
+      end)
+
+      window_manager.setup({ split_side = "right", split_width_percentage = 0.3 })
+      local win = window_manager.ensure_window()
+
+      assert.is_true(win_options[win].winfixwidth)
+      assert.is_nil(win_options[win].winfixbuf)
+    end)
+
+    it("swaps session buffers even when winfixbuf is set", function()
+      mock_vim.api.nvim_buf_is_valid = spy.new(function()
+        return true
+      end)
+      mock_vim.api.nvim_buf_get_name = spy.new(function()
+        return ""
+      end)
+      mock_vim.api.nvim_win_set_buf = spy.new(function() end)
+      mock_vim.bo = setmetatable({}, {
+        __index = function()
+          return { channel = 123, buftype = "" }
+        end,
+      })
+
+      window_manager.setup({ split_side = "right", split_width_percentage = 0.3 })
+      local win = window_manager.ensure_window()
+      assert.is_true(win_options[win].winfixbuf)
+
+      local ok = window_manager.display_buffer(42, false)
+
+      assert.is_true(ok)
+      assert.spy(mock_vim.api.nvim_win_set_buf).was_called_with(win, 42)
+      assert.is_true(win_options[win].winfixbuf)
+    end)
+
+    it("recreates the managed window when the previous one was closed externally", function()
+      window_manager.setup({ split_side = "right", split_width_percentage = 0.3 })
+      local win1 = window_manager.ensure_window()
+      assert.is_not_nil(win1)
+
+      -- Simulate the window having been closed externally (e.g. the user ran :q,
+      -- or a hidden buffer is being shown again after having lost its window).
+      mock_vim.api.nvim_win_is_valid = spy.new(function(w)
+        return w ~= win1
+      end)
+      mock_vim.api.nvim_get_current_win = spy.new(function()
+        return win1 + 1
+      end)
+
+      local win2 = window_manager.ensure_window()
+
+      assert.is_not_nil(win2)
+      assert.are_not.equal(win1, win2)
+      assert.spy(mock_vim.cmd).was_called(2)
+    end)
+
+    it("close_window hides the managed window and updates visibility state", function()
+      mock_vim.api.nvim_win_get_tabpage = spy.new(function()
+        return 1
+      end)
+      mock_vim.api.nvim_win_close = spy.new(function() end)
+
+      window_manager.setup({ split_side = "right", split_width_percentage = 0.3 })
+      local win = window_manager.ensure_window()
+      assert.is_true(window_manager.is_visible())
+
+      window_manager.close_window()
+
+      assert.spy(mock_vim.api.nvim_win_close).was_called_with(win, false)
+      assert.is_false(window_manager.is_visible())
+      assert.is_nil(window_manager.get_window())
+    end)
+
+    it("display_buffer focuses the window and starts insert mode when focus=true", function()
+      mock_vim.api.nvim_buf_is_valid = spy.new(function()
+        return true
+      end)
+      mock_vim.api.nvim_buf_get_name = spy.new(function()
+        return ""
+      end)
+      mock_vim.api.nvim_win_set_buf = spy.new(function() end)
+      mock_vim.api.nvim_set_current_win = spy.new(function() end)
+      mock_vim.bo = setmetatable({}, {
+        __index = function()
+          return { channel = 123, buftype = "" }
+        end,
+      })
+
+      window_manager.setup({ split_side = "right", split_width_percentage = 0.3 })
+      local win = window_manager.ensure_window()
+
+      local ok = window_manager.display_buffer(7, true)
+
+      assert.is_true(ok)
+      assert.spy(mock_vim.api.nvim_set_current_win).was_called_with(win)
+
+      local saw_startinsert = false
+      for _, call in ipairs(mock_vim.cmd.calls) do
+        if call.vals[1] == "startinsert" then
+          saw_startinsert = true
+        end
+      end
+      assert.is_true(saw_startinsert)
+    end)
+  end)
+
+  describe("manual resize persistence (D4: no auto-restore on VimResized/TabEnter)", function()
+    it("does not undo a manual resize on VimResized or TabEnter", function()
+      mock_vim.o = { columns = 200, lines = 40 }
+      mock_vim.wo = setmetatable({}, {
+        __index = function()
+          return {}
+        end,
+        __newindex = function() end,
+      })
+      mock_vim.cmd = spy.new(function() end)
+      mock_vim.fn.has = spy.new(function()
+        return 1
+      end)
+      mock_vim.api.nvim_win_set_width = spy.new(function() end)
+      mock_vim.api.nvim_win_set_height = spy.new(function() end)
+      mock_vim.api.nvim_tabpage_list_wins = spy.new(function()
+        return {}
+      end)
+      mock_vim.api.nvim_get_current_tabpage = spy.new(function()
+        return 1
+      end)
+
+      window_manager.setup({ split_side = "right", split_width_percentage = 0.3 })
+      local win = window_manager.ensure_window()
+      assert.is_not_nil(win)
+
+      -- Simulate the user manually resizing the window.
+      local manual_width = 50
+      mock_vim.api.nvim_win_get_width = spy.new(function()
+        return manual_width
+      end)
+
+      -- Find VimResized and TabEnter callbacks via the recorded autocmd calls
+      -- (R4: drive them directly rather than through nvim_exec_autocmds).
+      local vim_resized_callback, tab_enter_callback
+      for _, call in ipairs(mock_vim.api.nvim_create_autocmd.calls) do
+        if call.vals[1] == "VimResized" then
+          vim_resized_callback = call.vals[2].callback
+        elseif call.vals[1] == "TabEnter" then
+          tab_enter_callback = call.vals[2].callback
+        end
+      end
+      assert.is_function(vim_resized_callback)
+      assert.is_function(tab_enter_callback)
+
+      mock_vim.api.nvim_win_set_width = spy.new(function() end)
+
+      vim_resized_callback()
+      tab_enter_callback()
+
+      assert.spy(mock_vim.api.nvim_win_set_width).was_not_called()
+      assert.are.equal(manual_width, mock_vim.api.nvim_win_get_width(win))
     end)
   end)
 end)

@@ -50,54 +50,78 @@ local function find_terminal_window()
   return nil
 end
 
----Restore the terminal window to its configured width percentage
----@return boolean success
-local function restore_configured_width()
-  if not state.winid or not vim.api.nvim_win_is_valid(state.winid) then
-    return false
+---Check whether a split_side places the window above/below (true) or
+---beside (false) the rest of the layout.
+---@param cfg table Window configuration
+---@return boolean
+local function is_horizontal(cfg)
+  return cfg.split_side == "top" or cfg.split_side == "bottom"
+end
+
+---Pin the managed window so other plugins/commands cannot resize, spell-check,
+---or swap the buffer out from under it.
+---@param winid number
+---@param cfg table Window configuration
+local function pin_window(winid, cfg)
+  if is_horizontal(cfg) then
+    vim.wo[winid].winfixheight = true
+  else
+    vim.wo[winid].winfixwidth = true
   end
-  if not state.config then
-    return false
+  vim.wo[winid].spell = false
+  if vim.fn.has("nvim-0.10") == 1 then
+    vim.wo[winid].winfixbuf = true
   end
-  local split_width_percentage = state.config.split_width_percentage or 0.4
-  local total_width = vim.o.columns
-  local width = math.floor(total_width * split_width_percentage)
-  vim.api.nvim_win_set_width(state.winid, width)
-  return true
 end
 
 ---Create a split window for the terminal
----@param config table Window configuration
+---@param cfg table Window configuration
 ---@return number|nil winid
-local function create_split_window(config)
-  local split_side = config.split_side or "right"
-  local split_width_percentage = config.split_width_percentage or 0.4
+local function create_split_window(cfg)
+  local side = cfg.split_side or "right"
+  local frac = cfg.split_width_percentage or 0.4
+  local lead = (side == "left" or side == "top") and "topleft " or "botright "
 
-  -- Calculate dimensions
-  local total_width = vim.o.columns
-  local width = math.floor(total_width * split_width_percentage)
-
-  -- Create the split
-  if split_side == "left" then
-    vim.cmd("topleft vertical new")
+  -- Create the split. split_width_percentage is a fraction of lines for
+  -- top/bottom splits, and of columns for left/right splits.
+  if is_horizontal(cfg) then
+    vim.cmd(lead .. "new")
   else
-    vim.cmd("botright vertical new")
+    vim.cmd(lead .. "vertical new")
   end
 
   local winid = vim.api.nvim_get_current_win()
 
-  -- Set window width
-  vim.api.nvim_win_set_width(winid, width)
+  if is_horizontal(cfg) then
+    vim.api.nvim_win_set_height(winid, math.floor(vim.o.lines * frac))
+  else
+    vim.api.nvim_win_set_width(winid, math.floor(vim.o.columns * frac))
+  end
 
   -- Set window options for terminal display
   vim.wo[winid].number = false
   vim.wo[winid].relativenumber = false
   vim.wo[winid].signcolumn = "no"
-  vim.wo[winid].winfixwidth = false -- Allow user resizing
+  pin_window(winid, cfg)
 
-  logger.debug("window_manager", "Created split window: " .. winid .. " (width=" .. width .. ")")
+  logger.debug("window_manager", "Created split window: " .. winid .. " (side=" .. side .. ")")
 
   return winid
+end
+
+---Set a window's buffer, temporarily lifting 'winfixbuf' (0.10+) since that
+---option also blocks our own nvim_win_set_buf call, not just user commands.
+---@param winid number
+---@param bufnr number
+local function set_win_buf(winid, bufnr)
+  local fixed = vim.fn.has("nvim-0.10") == 1 and vim.wo[winid].winfixbuf
+  if fixed then
+    vim.wo[winid].winfixbuf = false
+  end
+  vim.api.nvim_win_set_buf(winid, bufnr)
+  if fixed then
+    vim.wo[winid].winfixbuf = true
+  end
 end
 
 ---Notify the terminal of its current dimensions (sends SIGWINCH)
@@ -130,11 +154,12 @@ end
 local function setup_resize_autocommands()
   local group = vim.api.nvim_create_augroup("ClaudeCodeTerminalResize", { clear = true })
 
-  -- Handle Neovim window resize
+  -- Handle Neovim window resize. Per D4, this only notifies the terminal of
+  -- its new dimensions; it does not restore the configured width/height, so
+  -- a manual resize by the user sticks across a Neovim resize.
   vim.api.nvim_create_autocmd("VimResized", {
     group = group,
     callback = function()
-      restore_configured_width()
       M.notify_resize(true)
     end,
   })
@@ -185,9 +210,10 @@ local function setup_resize_autocommands()
       if terminal_win then
         state.winid = terminal_win
         state.current_bufnr = vim.api.nvim_win_get_buf(terminal_win)
-        -- Longer delay for tab switches to ensure everything is settled
+        -- Longer delay for tab switches to ensure everything is settled.
+        -- Per D4, this only notifies of dimensions; it does not restore the
+        -- configured width/height, so a manual resize sticks across tabs.
         vim.defer_fn(function()
-          restore_configured_width()
           M.notify_resize()
         end, 100)
       end
@@ -297,7 +323,7 @@ function M.display_buffer(bufnr, focus)
   local is_scratch = current_bufname == "" and vim.bo[current_buf].buftype == ""
 
   -- Switch buffer in window (THE KEY OPERATION)
-  vim.api.nvim_win_set_buf(winid, bufnr)
+  set_win_buf(winid, bufnr)
   state.current_bufnr = bufnr
 
   -- Clean up scratch buffer created by :new

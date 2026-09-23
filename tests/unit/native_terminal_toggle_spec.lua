@@ -268,177 +268,17 @@ describe("claudecode.terminal.native toggle behavior", function()
       assert.are.equal("claudecode", mock_state.buffers[bufnr].options.filetype)
     end)
 
-    it("should pin the terminal window and disable spell on open", function()
-      pending("re-ported in Task 4: window pinning (winfixwidth/winfixheight/winfixbuf, nospell)")
-      local config = { split_side = "right", split_width_percentage = 0.3 }
-
-      native_provider.open("claude", {}, config)
-
-      local mock_state = _G.get_mock_state()
-      local opts = mock_state.windows[mock_state.current_win].options
-      assert.is_true(opts.winfixwidth)
-      assert.is_true(opts.winfixbuf)
-      assert.is_false(opts.spell)
-    end)
-
-    it("should pin height instead of width for a bottom split", function()
-      pending("re-ported in Task 4: window pinning (winfixwidth/winfixheight/winfixbuf, nospell)")
-      local config = { split_side = "bottom", split_width_percentage = 0.3 }
-
-      native_provider.open("claude", {}, config)
-
-      local mock_state = _G.get_mock_state()
-      local opts = mock_state.windows[mock_state.current_win].options
-      assert.is_true(opts.winfixheight)
-      assert.is_nil(opts.winfixwidth)
-    end)
-
-    it("should skip winfixbuf on Neovim < 0.10", function()
-      pending("re-ported in Task 4: window pinning (winfixwidth/winfixheight/winfixbuf, nospell)")
-      local mock_state = _G.get_mock_state()
-      mock_state.has_nvim_010 = false
-      local config = { split_side = "right", split_width_percentage = 0.3 }
-
-      native_provider.open("claude", {}, config)
-
-      local opts = mock_state.windows[mock_state.current_win].options
-      assert.is_true(opts.winfixwidth)
-      assert.is_nil(opts.winfixbuf)
-    end)
+    -- Window pinning (winfixwidth/winfixheight/winfixbuf, nospell) is owned by
+    -- window_manager, not this provider; see the "split_side (top/bottom/left/right)
+    -- and window pinning" describe block in tests/unit/terminal/window_manager_spec.lua.
   end)
 
-  describe("toggle with existing hidden terminal", function()
-    it("should show hidden terminal instead of creating new one", function()
-      pending("re-ported in Task 4: managed split window (vsplit/split creation, hide/show/focus of the pinned window)")
-      local cmd_string = "claude"
-      local env_table = { TEST = "value" }
-      local config = { split_side = "right", split_width_percentage = 0.3 }
-
-      -- First create a terminal
-      mock_vim.fn.termopen = function(cmd, opts)
-        return 12345 -- Valid job ID
-      end
-      native_provider.open(cmd_string, env_table, config)
-
-      local initial_bufnr = native_provider.get_active_bufnr()
-      assert.is_not_nil(initial_bufnr)
-
-      -- Simulate hiding the terminal (buffer exists but no window shows it)
-      mock_vim.api.nvim_list_wins = function()
-        return { 1, 3 } -- Window 2 (which had our buffer) is gone
-      end
-      mock_vim.api.nvim_win_get_buf = function(winid)
-        return 50 -- Other windows have different buffers
-      end
-
-      -- Mock window creation for showing hidden terminal
-      local vsplit_called = false
-      local original_cmd = mock_vim.cmd
-      mock_vim.cmd = function(command)
-        if command:match("vsplit") then
-          vsplit_called = true
-        end
-        original_cmd(command)
-      end
-
-      mock_vim.api.nvim_get_current_win = function()
-        return 4 -- New window created
-      end
-
-      -- Toggle should show the hidden terminal
-      native_provider.toggle(cmd_string, env_table, config)
-
-      -- Should not have created a new buffer/job, just shown existing one
-      assert.are.equal(initial_bufnr, native_provider.get_active_bufnr())
-      assert.is_true(vsplit_called)
-    end)
-  end)
-
-  describe("toggle with visible terminal", function()
-    it("should hide terminal when toggling from inside it and set bufhidden=hide", function()
-      pending("re-ported in Task 4: managed split window (vsplit/split creation, hide/show/focus of the pinned window)")
-      local cmd_string = "claude"
-      local env_table = { TEST = "value" }
-      local config = { split_side = "right", split_width_percentage = 0.3 }
-
-      -- Create a terminal by opening it
-      native_provider.open(cmd_string, env_table, config)
-      local initial_bufnr = native_provider.get_active_bufnr()
-      assert.is_not_nil(initial_bufnr)
-
-      local mock_state = _G.get_mock_state()
-
-      -- Verify initial state - buffer should exist and have a window
-      assert.is_not_nil(mock_state.buffers[initial_bufnr])
-      assert.are.equal("hide", mock_state.buffers[initial_bufnr].options.bufhidden)
-
-      -- Find the window that contains our terminal buffer
-      local terminal_winid = nil
-      for winid, win in pairs(mock_state.windows) do
-        if win.bufnr == initial_bufnr then
-          terminal_winid = winid
-          break
-        end
-      end
-      assert.is_not_nil(terminal_winid)
-
-      -- Mock that we're currently in the terminal window
-      mock_state.current_win = terminal_winid
-
-      -- Toggle should hide the terminal
-      native_provider.toggle(cmd_string, env_table, config)
-
-      -- Verify the critical behavior:
-      -- 1. Buffer should still exist and be valid
-      assert.are.equal(initial_bufnr, native_provider.get_active_bufnr())
-      assert.is_not_nil(mock_state.buffers[initial_bufnr])
-
-      -- 2. Window should be closed/invalid
-      assert.is_nil(mock_state.windows[terminal_winid])
-    end)
-
-    it("should focus terminal when focus toggling from outside it", function()
-      pending("re-ported in Task 4: managed split window (vsplit/split creation, hide/show/focus of the pinned window)")
-      local cmd_string = "claude"
-      local env_table = { TEST = "value" }
-      local config = { split_side = "right", split_width_percentage = 0.3 }
-
-      -- Create a terminal
-      native_provider.open(cmd_string, env_table, config)
-      local initial_bufnr = native_provider.get_active_bufnr()
-      local mock_state = _G.get_mock_state()
-
-      -- Find the terminal window that was created
-      local terminal_winid = nil
-      for winid, win in pairs(mock_state.windows) do
-        if win.bufnr == initial_bufnr then
-          terminal_winid = winid
-          break
-        end
-      end
-      assert.is_not_nil(terminal_winid)
-
-      -- Mock that we're NOT in the terminal window (simulate being in a different window)
-      mock_state.current_win = 1 -- Some other window
-
-      local set_current_win_called = false
-      local focused_winid = nil
-      local original_set_current_win = mock_vim.api.nvim_set_current_win
-      mock_vim.api.nvim_set_current_win = function(winid)
-        set_current_win_called = true
-        focused_winid = winid
-        return original_set_current_win(winid)
-      end
-
-      -- Focus toggle should focus the terminal
-      native_provider.focus_toggle(cmd_string, env_table, config)
-
-      -- Should have focused the terminal window
-      assert.is_true(set_current_win_called)
-      assert.are.equal(terminal_winid, focused_winid)
-      assert.are.equal(initial_bufnr, native_provider.get_active_bufnr())
-    end)
-  end)
+  -- "toggle with existing hidden terminal" and "toggle with visible terminal":
+  -- managed-window reuse and hide/show/focus of the pinned window are now
+  -- window_manager concerns; see window_manager_spec.lua ("recreates the
+  -- managed window when the previous one was closed externally", "close_window
+  -- hides the managed window and updates visibility state", "display_buffer
+  -- focuses the window and starts insert mode when focus=true").
 
   describe("close vs toggle behavior", function()
     it("should preserve process on toggle but kill on close", function()
@@ -477,33 +317,11 @@ describe("claudecode.terminal.native toggle behavior", function()
   end)
 
   describe("simple_toggle behavior", function()
-    it("should always hide terminal when visible, regardless of focus", function()
-      pending("re-ported in Task 4: managed split window (vsplit/split creation, hide/show/focus of the pinned window)")
-      local cmd_string = "claude"
-      local env_table = { TEST = "value" }
-      local config = { split_side = "right", split_width_percentage = 0.3 }
-
-      -- Create a terminal
-      native_provider.open(cmd_string, env_table, config)
-      local initial_bufnr = native_provider.get_active_bufnr()
-      local mock_state = _G.get_mock_state()
-
-      -- Find the terminal window
-      local terminal_winid = nil
-      for winid, win in pairs(mock_state.windows) do
-        if win.bufnr == initial_bufnr then
-          terminal_winid = winid
-          break
-        end
-      end
-
-      -- Test 1: Not in terminal window - simple_toggle should still hide
-      mock_state.current_win = 1 -- Different window
-      native_provider.simple_toggle(cmd_string, env_table, config)
-
-      -- Should have hidden the terminal (closed window)
-      assert.is_nil(mock_state.windows[terminal_winid])
-    end)
+    -- "should always hide terminal when visible, regardless of focus" and
+    -- "should show hidden terminal when toggled" are now window_manager
+    -- concerns; see window_manager_spec.lua ("close_window hides the managed
+    -- window and updates visibility state", "recreates the managed window
+    -- when the previous one was closed externally").
 
     it("should always show terminal when not visible", function()
       pending("re-ported in Task 5: native terminal buffer creation via parse_command argv")
@@ -520,155 +338,13 @@ describe("claudecode.terminal.native toggle behavior", function()
       -- Should have created terminal
       assert.is_not_nil(native_provider.get_active_bufnr())
     end)
-
-    it("should show hidden terminal when toggled", function()
-      pending("re-ported in Task 4: managed split window (vsplit/split creation, hide/show/focus of the pinned window)")
-      local cmd_string = "claude"
-      local env_table = { TEST = "value" }
-      local config = { split_side = "right", split_width_percentage = 0.3 }
-
-      -- Create and then hide a terminal
-      native_provider.open(cmd_string, env_table, config)
-      local initial_bufnr = native_provider.get_active_bufnr()
-      native_provider.simple_toggle(cmd_string, env_table, config) -- Hide it
-
-      -- Mock window creation for showing hidden terminal
-      local vsplit_called = false
-      local original_cmd = mock_vim.cmd
-      mock_vim.cmd = function(command)
-        if command:match("vsplit") then
-          vsplit_called = true
-        end
-        original_cmd(command)
-      end
-
-      -- Simple toggle should show the hidden terminal
-      native_provider.simple_toggle(cmd_string, env_table, config)
-
-      -- Should have shown the existing terminal
-      assert.are.equal(initial_bufnr, native_provider.get_active_bufnr())
-      assert.is_true(vsplit_called)
-    end)
   end)
 
-  describe("focus_toggle behavior", function()
-    it("should focus terminal when visible but not focused", function()
-      pending("re-ported in Task 4: managed split window (vsplit/split creation, hide/show/focus of the pinned window)")
-      local cmd_string = "claude"
-      local env_table = { TEST = "value" }
-      local config = { split_side = "right", split_width_percentage = 0.3 }
-
-      -- Create a terminal
-      native_provider.open(cmd_string, env_table, config)
-      local initial_bufnr = native_provider.get_active_bufnr()
-      local mock_state = _G.get_mock_state()
-
-      -- Find the terminal window
-      local terminal_winid = nil
-      for winid, win in pairs(mock_state.windows) do
-        if win.bufnr == initial_bufnr then
-          terminal_winid = winid
-          break
-        end
-      end
-
-      -- Mock that we're NOT in the terminal window
-      mock_state.current_win = 1 -- Some other window
-
-      local set_current_win_called = false
-      local focused_winid = nil
-      local original_set_current_win = mock_vim.api.nvim_set_current_win
-      mock_vim.api.nvim_set_current_win = function(winid)
-        set_current_win_called = true
-        focused_winid = winid
-        return original_set_current_win(winid)
-      end
-
-      -- Focus toggle should focus the terminal
-      native_provider.focus_toggle(cmd_string, env_table, config)
-
-      -- Should have focused the terminal window
-      assert.is_true(set_current_win_called)
-      assert.are.equal(terminal_winid, focused_winid)
-    end)
-
-    it("should open a horizontal split for bottom split_side", function()
-      pending("re-ported in Task 4: top/bottom split_side")
-      local cmd_string = "claude"
-      local env_table = { TEST = "value" }
-      local config = { split_side = "bottom", split_width_percentage = 0.3 }
-
-      local captured = {}
-      local original_cmd = mock_vim.cmd
-      mock_vim.cmd = function(command)
-        table.insert(captured, command)
-        return original_cmd(command)
-      end
-
-      native_provider.open(cmd_string, env_table, config)
-
-      local saw_horizontal = false
-      for _, c in ipairs(captured) do
-        if c:match("^botright %d+split$") then
-          saw_horizontal = true
-        end
-        assert.is_nil(c:match("vsplit"), "bottom split_side must not use vsplit")
-      end
-      assert.is_true(saw_horizontal, "expected a botright <n>split command")
-    end)
-
-    it("should open a horizontal split for top split_side", function()
-      pending("re-ported in Task 4: top/bottom split_side")
-      local cmd_string = "claude"
-      local env_table = { TEST = "value" }
-      local config = { split_side = "top", split_width_percentage = 0.3 }
-
-      local captured = {}
-      local original_cmd = mock_vim.cmd
-      mock_vim.cmd = function(command)
-        table.insert(captured, command)
-        return original_cmd(command)
-      end
-
-      native_provider.open(cmd_string, env_table, config)
-
-      local saw_horizontal = false
-      for _, c in ipairs(captured) do
-        if c:match("^topleft %d+split$") then
-          saw_horizontal = true
-        end
-      end
-      assert.is_true(saw_horizontal, "expected a topleft <n>split command")
-    end)
-
-    it("should hide terminal when focused and toggle called", function()
-      pending("re-ported in Task 4: managed split window (vsplit/split creation, hide/show/focus of the pinned window)")
-      local cmd_string = "claude"
-      local env_table = { TEST = "value" }
-      local config = { split_side = "right", split_width_percentage = 0.3 }
-
-      -- Create a terminal
-      native_provider.open(cmd_string, env_table, config)
-      local initial_bufnr = native_provider.get_active_bufnr()
-      local mock_state = _G.get_mock_state()
-
-      -- Find the terminal window
-      local terminal_winid = nil
-      for winid, win in pairs(mock_state.windows) do
-        if win.bufnr == initial_bufnr then
-          terminal_winid = winid
-          break
-        end
-      end
-
-      -- Mock being in the terminal window
-      mock_state.current_win = terminal_winid
-
-      -- Focus toggle should hide the terminal
-      native_provider.focus_toggle(cmd_string, env_table, config)
-
-      -- Should have hidden the terminal
-      assert.is_nil(mock_state.windows[terminal_winid])
-    end)
-  end)
+  -- "focus_toggle behavior": focus/hide of the pinned window and the
+  -- top/bottom split_side command and size are now window_manager concerns;
+  -- see window_manager_spec.lua ("display_buffer focuses the window and
+  -- starts insert mode when focus=true", "close_window hides the managed
+  -- window and updates visibility state", "creates a horizontal split sized
+  -- by lines for split_side=bottom", "creates a horizontal split using
+  -- topleft for split_side=top").
 end)
