@@ -118,9 +118,12 @@ local function set_win_buf(winid, bufnr)
   if fixed then
     vim.wo[winid].winfixbuf = false
   end
-  vim.api.nvim_win_set_buf(winid, bufnr)
+  local ok, err = pcall(vim.api.nvim_win_set_buf, winid, bufnr)
   if fixed then
     vim.wo[winid].winfixbuf = true
+  end
+  if not ok then
+    error(err, 0)
   end
 end
 

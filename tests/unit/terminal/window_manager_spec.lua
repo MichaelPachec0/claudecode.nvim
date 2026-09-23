@@ -840,12 +840,20 @@ describe("claudecode.terminal.window_manager", function()
       mock_vim.api.nvim_buf_get_name = spy.new(function()
         return ""
       end)
-      mock_vim.api.nvim_win_set_buf = spy.new(function() end)
       mock_vim.bo = setmetatable({}, {
         __index = function()
           return { channel = 123, buftype = "" }
         end,
       })
+
+      -- Real Neovim raises E1513 from nvim_win_set_buf while winfixbuf is on;
+      -- set_win_buf must lift the pin before calling it, so this mock only
+      -- throws if winfixbuf is still (incorrectly) set at call time.
+      mock_vim.api.nvim_win_set_buf = spy.new(function(winid)
+        if win_options[winid] and win_options[winid].winfixbuf then
+          error("Vim:E1513: Cannot switch buffer. 'winfixbuf' is enabled", 0)
+        end
+      end)
 
       window_manager.setup({ split_side = "right", split_width_percentage = 0.3 })
       local win = window_manager.ensure_window()
@@ -855,6 +863,34 @@ describe("claudecode.terminal.window_manager", function()
 
       assert.is_true(ok)
       assert.spy(mock_vim.api.nvim_win_set_buf).was_called_with(win, 42)
+      assert.is_true(win_options[win].winfixbuf)
+    end)
+
+    it("restores winfixbuf and propagates the error when the buffer swap fails for another reason", function()
+      mock_vim.api.nvim_buf_is_valid = spy.new(function()
+        return true
+      end)
+      mock_vim.api.nvim_buf_get_name = spy.new(function()
+        return ""
+      end)
+      mock_vim.bo = setmetatable({}, {
+        __index = function()
+          return { channel = 123, buftype = "" }
+        end,
+      })
+      -- Some other failure, unrelated to winfixbuf (e.g. an invalid buffer).
+      mock_vim.api.nvim_win_set_buf = spy.new(function()
+        error("boom: something else went wrong", 0)
+      end)
+
+      window_manager.setup({ split_side = "right", split_width_percentage = 0.3 })
+      local win = window_manager.ensure_window()
+      assert.is_true(win_options[win].winfixbuf)
+
+      local ok, err = pcall(window_manager.display_buffer, 42, false)
+
+      assert.is_false(ok)
+      assert.matches("boom: something else went wrong", tostring(err), 1, true)
       assert.is_true(win_options[win].winfixbuf)
     end)
 
@@ -955,6 +991,24 @@ describe("claudecode.terminal.window_manager", function()
       local win = window_manager.ensure_window()
       assert.is_not_nil(win)
 
+      -- Make find_terminal_window() actually locate this window as a real
+      -- Claude terminal, so the TabEnter callback body below runs instead of
+      -- short-circuiting on a nil find (which would make the "was not
+      -- called" assertions pass vacuously).
+      mock_vim.api.nvim_tabpage_list_wins = spy.new(function()
+        return { win }
+      end)
+      mock_vim.bo = setmetatable({}, {
+        __index = function()
+          return { channel = 123, buftype = "terminal" }
+        end,
+      })
+      mock_vim.b = setmetatable({}, {
+        __index = function()
+          return { claudecode_terminal = true }
+        end,
+      })
+
       -- Simulate the user manually resizing the window.
       local manual_width = 50
       mock_vim.api.nvim_win_get_width = spy.new(function()
@@ -975,11 +1029,32 @@ describe("claudecode.terminal.window_manager", function()
       assert.is_function(tab_enter_callback)
 
       mock_vim.api.nvim_win_set_width = spy.new(function() end)
+      mock_vim.fn.jobresize = spy.new(function() end)
 
       vim_resized_callback()
+
+      -- Prove the VimResized callback actually reached notify_resize (it
+      -- always does, regardless of find_terminal_window; notify_resize(true)
+      -- forces the jobresize call).
+      assert.spy(mock_vim.fn.jobresize).was_called()
+
+      -- Change the reported height so TabEnter's (non-forced) notify_resize
+      -- sees a dimension change and reaches jobresize again; this proves the
+      -- TabEnter callback body executed rather than short-circuiting.
+      mock_vim.api.nvim_win_get_height = spy.new(function()
+        return 30
+      end)
+      mock_vim.fn.jobresize = spy.new(function() end)
+      mock_vim.defer_fn = spy.new(function(fn)
+        fn()
+      end)
+
       tab_enter_callback()
 
+      assert.spy(mock_vim.defer_fn).was_called()
+      assert.spy(mock_vim.fn.jobresize).was_called_with(123, manual_width, 30)
       assert.spy(mock_vim.api.nvim_win_set_width).was_not_called()
+      assert.spy(mock_vim.api.nvim_win_set_height).was_not_called()
       assert.are.equal(manual_width, mock_vim.api.nvim_win_get_width(win))
     end)
   end)
