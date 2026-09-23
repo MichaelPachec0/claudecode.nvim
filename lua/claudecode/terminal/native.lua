@@ -135,6 +135,14 @@ local function open_terminal(cmd_string, env_table, effective_config, focus)
   vim.bo[bufnr].buflisted = false
   -- buftype=terminal is set by termopen
 
+  -- Shift+Enter inserts a line continuation (backslash + newline) in the terminal
+  vim.keymap.set("t", "<S-CR>", function()
+    vim.api.nvim_feedkeys("\\", "t", true)
+    vim.defer_fn(function()
+      vim.api.nvim_feedkeys("\r", "t", true)
+    end, 10)
+  end, { buffer = bufnr, desc = "New line" })
+
   if focus then
     -- Focus the terminal: switch to terminal window and enter insert mode
     vim.api.nvim_set_current_win(winid)
