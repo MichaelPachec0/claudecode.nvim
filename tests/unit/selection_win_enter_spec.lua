@@ -211,17 +211,25 @@ describe("Selection WinEnter event handling", function()
       selection_module.update_selection = original_update
     end)
 
-    it("should cancel pending debounce timer", function()
+    it("should cancel pending debounce timer and close its handle", function()
       selection_module.enable(mock_server, 50)
 
       -- Simulate a pending debounce timer
-      local mock_timer = { stopped = false }
+      local mock_timer = { stopped = false, closed = false }
+      function mock_timer:stop()
+        self.stopped = true
+      end
+      function mock_timer:close()
+        self.closed = true
+      end
       selection_module.state.debounce_timer = mock_timer
 
       selection_module.on_win_enter()
 
-      -- Check that timer_stop was called
-      expect(#mock_vim._timer_stops > 0).to_be_true()
+      -- A stopped timer never fires the callback that would close it, so
+      -- on_win_enter itself must stop AND close the handle (no leak).
+      expect(mock_timer.stopped).to_be_true()
+      expect(mock_timer.closed).to_be_true()
       expect(selection_module.state.debounce_timer).to_be_nil()
     end)
 

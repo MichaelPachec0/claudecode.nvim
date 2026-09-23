@@ -243,11 +243,9 @@ end
 ---Triggers an immediate update to ensure file reference is sent on keyboard navigation.
 ---Uses a small delay similar to mouse handler to ensure state is settled.
 function M.on_win_enter()
-  -- Cancel any pending debounce to avoid duplicate updates
-  if M.state.debounce_timer then
-    vim.loop.timer_stop(M.state.debounce_timer)
-    M.state.debounce_timer = nil
-  end
+  -- Cancel any pending debounce to avoid duplicate updates. Stops AND closes
+  -- the handle: a stopped timer never runs the callback that would close it.
+  M._cancel_debounce_timer()
 
   -- Use a small delay to ensure window/buffer state is settled
   -- This mirrors the mouse handler behavior which works reliably
