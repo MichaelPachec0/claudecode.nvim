@@ -794,8 +794,15 @@ local function register_new_instance(session_id, term_instance, config)
   -- Register buffer-to-session mapping for cleanup on BufUnload (Fix 1)
   terminal_module.register_buffer_session(term_instance.buf, session_id)
 
-  -- Set up smart ESC handling if enabled
-  if config.esc_timeout and config.esc_timeout > 0 and term_instance.buf then
+  -- Set up terminal keymaps (smart ESC, legacy exit key, split navigation).
+  -- Called unconditionally, exactly as the native provider does: the function
+  -- itself gates smart ESC on esc_timeout > 0, the legacy simple keymap on
+  -- keymaps.exit_terminal, and split navigation on split_navigation, so with
+  -- default config (esc_timeout = 0, keymaps.exit_terminal = false,
+  -- split_navigation = false) it installs nothing. Snacks' own win.keys-based
+  -- exit_terminal binding in build_opts (used only when esc_timeout <= 0) is
+  -- untouched by this call.
+  if term_instance.buf then
     terminal_module.setup_terminal_keymaps(term_instance.buf, config)
   end
 
