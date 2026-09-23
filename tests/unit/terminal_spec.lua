@@ -1031,6 +1031,36 @@ describe("claudecode.terminal (wrapper for Snacks.nvim)", function()
         assert.is_table(toggle_call.refs[2]) -- env_table
         assert.is_table(toggle_call.refs[3]) -- effective_config
       end)
+
+      it("should forward split_navigation in the effective_config given to providers", function()
+        local function make_provider(open_spy)
+          return {
+            setup = spy.new(function() end),
+            open = open_spy,
+            close = spy.new(function() end),
+            simple_toggle = spy.new(function() end),
+            focus_toggle = spy.new(function() end),
+            get_active_bufnr = spy.new(function()
+              return 123
+            end),
+            is_available = spy.new(function()
+              return true
+            end),
+          }
+        end
+
+        -- Default (true) reaches the provider, so Snacks installs the maps too.
+        local open_default = spy.new(function() end)
+        terminal_wrapper.setup({ provider = make_provider(open_default) })
+        terminal_wrapper.open({}, nil)
+        assert.is_true(open_default:get_call(1).refs[3].split_navigation)
+
+        -- An explicit false is forwarded as well.
+        local open_off = spy.new(function() end)
+        terminal_wrapper.setup({ provider = make_provider(open_off), split_navigation = false })
+        terminal_wrapper.open({}, nil)
+        assert.is_false(open_off:get_call(1).refs[3].split_navigation)
+      end)
     end)
 
     describe("fallback behavior", function()
@@ -1562,6 +1592,7 @@ describe("claudecode.terminal (wrapper for Snacks.nvim)", function()
       terminal_module.setup_terminal_keymaps(BUFNR, {
         esc_timeout = 0,
         keymaps = { exit_terminal = "<Esc><Esc>" },
+        split_navigation = false,
       })
       vim.keymap.set:revert()
       assert.equals(1, #set_calls)

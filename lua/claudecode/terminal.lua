@@ -357,10 +357,8 @@ function M.setup_terminal_keymaps(bufnr, config)
     })
   end
 
-  -- Split navigation: Ctrl+h/j/k/l to move between splits from terminal mode.
-  -- Only when explicitly enabled; provider configs always carry the resolved
-  -- default, so an absent key means the caller did not ask for these maps.
-  if config.split_navigation == true then
+  -- Split navigation: Ctrl+h/j/k/l to move between splits from terminal mode
+  if config.split_navigation ~= false then
     local saved_mode = {} -- per-buffer saved mode
 
     local directions = { h = "left", j = "below", k = "above", l = "right" }
@@ -967,6 +965,7 @@ local function build_config(opts_override)
     cwd = resolved_cwd,
     keymaps = effective_config.keymaps,
     esc_timeout = effective_config.esc_timeout,
+    split_navigation = effective_config.split_navigation,
   }
 end
 
