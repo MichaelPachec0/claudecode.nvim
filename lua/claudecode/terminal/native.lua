@@ -20,12 +20,19 @@ local function cleanup_state()
   jobid = nil
 end
 
----Pin the terminal window: keep its width through <C-w>= and stop other
----buffers (e.g. :bnext) from replacing the terminal in it. Also turns spell
----checking off for the window. 'winfixbuf' only exists on Neovim >= 0.10.
+---Pin the terminal window: keep its size on the split axis through <C-w>=
+---(height for top/bottom splits, width for left/right) and stop other buffers
+---(e.g. :bnext) from replacing the terminal in it. Also turns spell checking
+---off for the window. 'winfixbuf' only exists on Neovim >= 0.10.
 ---@param win number
-local function apply_terminal_window_options(win)
-  vim.wo[win].winfixwidth = true
+---@param effective_config ClaudeCodeTerminalConfig
+local function apply_terminal_window_options(win, effective_config)
+  local side = effective_config.split_side
+  if side == "top" or side == "bottom" then
+    vim.wo[win].winfixheight = true
+  else
+    vim.wo[win].winfixwidth = true
+  end
   vim.wo[win].spell = false
   if vim.fn.has("nvim-0.10") == 1 then
     vim.wo[win].winfixbuf = true
@@ -102,7 +109,7 @@ local function open_terminal(cmd_string, env_table, effective_config, focus)
     vim.cmd("enew")
   end)
 
-  apply_terminal_window_options(new_winid)
+  apply_terminal_window_options(new_winid, effective_config)
 
   -- Shell-aware split + leading-tilde expansion so quoted args and "~/..."
   -- paths survive, while no shell touches bracketed model aliases like
@@ -259,7 +266,7 @@ local function show_hidden_terminal(effective_config, focus)
   vim.api.nvim_win_set_buf(new_winid, bufnr)
   winid = new_winid
 
-  apply_terminal_window_options(winid)
+  apply_terminal_window_options(winid, effective_config)
 
   if focus then
     -- Focus the terminal: switch to terminal window and enter insert mode

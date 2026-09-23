@@ -278,6 +278,17 @@ describe("claudecode.terminal.native toggle behavior", function()
       assert.is_false(opts.spell)
     end)
 
+    it("should pin height instead of width for a bottom split", function()
+      local config = { split_side = "bottom", split_width_percentage = 0.3 }
+
+      native_provider.open("claude", {}, config)
+
+      local mock_state = _G.get_mock_state()
+      local opts = mock_state.windows[mock_state.current_win].options
+      assert.is_true(opts.winfixheight)
+      assert.is_nil(opts.winfixwidth)
+    end)
+
     it("should skip winfixbuf on Neovim < 0.10", function()
       local mock_state = _G.get_mock_state()
       mock_state.has_nvim_010 = false
