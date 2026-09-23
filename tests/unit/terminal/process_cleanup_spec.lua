@@ -33,6 +33,12 @@ describe("claudecode.terminal.process_cleanup", function()
   end)
 
   describe("stop", function()
+    ---Extracts the {cmd, opts} pair from the Nth jobstart call.
+    local function jobstart_call(n)
+      local call = vim.fn.jobstart.calls[n or 1]
+      return call.vals[1], call.vals[2]
+    end
+
     it("jobstop_only never spawns pkill", function()
       cleanup.stop(7, "jobstop_only")
       assert.spy(vim.fn.jobstop).was_called_with(7)
@@ -40,21 +46,47 @@ describe("claudecode.terminal.process_cleanup", function()
       assert.spy(vim.fn.system).was_not_called()
     end)
 
-    it("pkill_children spawns pkill asynchronously, never vim.fn.system", function()
+    it("pkill_children runs the script as a plain job, deferring jobstop to on_exit", function()
       cleanup.stop(7, "pkill_children")
-      assert.spy(vim.fn.jobstart).was_called_with({ "pkill", "-TERM", "-P", "4242" }, { detach = true })
+
+      assert.spy(vim.fn.jobstart).was_called(1)
+      local cmd, opts = jobstart_call()
+      assert.are.equal("sh", cmd[1])
+      assert.are.equal("-c", cmd[2])
+      local script = cmd[3]
+      -- Process group, direct children, and the shell itself, all signaled
+      -- before jobstop is ever called.
+      assert.truthy(script:match("kill %-TERM %-4242"))
+      assert.truthy(script:match("pkill %-TERM %-P 4242"))
+      assert.truthy(script:match("kill %-TERM 4242"))
+      assert.is_nil(opts.detach)
+      assert.is_function(opts.on_exit)
       assert.spy(vim.fn.system).was_not_called()
+
+      -- The ordering fix: jobstop must NOT have fired yet.
+      assert.spy(vim.fn.jobstop).was_not_called()
+
+      -- Once the kill script reports it is done, jobstop runs.
+      opts.on_exit()
       assert.spy(vim.fn.jobstop).was_called_with(7)
     end)
 
-    it("aggressive spawns pkill -KILL asynchronously", function()
+    it("aggressive runs a KILL-only script and defers jobstop to on_exit", function()
       cleanup.stop(7, "aggressive")
-      assert.spy(vim.fn.jobstart).was_called_with({ "pkill", "-KILL", "-P", "4242" }, { detach = true })
+
+      local cmd, opts = jobstart_call()
+      local script = cmd[3]
+      assert.truthy(script:match("pkill %-KILL %-P 4242"))
+      assert.truthy(script:match("kill %-KILL 4242"))
+      assert.is_nil(opts.detach)
       assert.spy(vim.fn.system).was_not_called()
+      assert.spy(vim.fn.jobstop).was_not_called()
+
+      opts.on_exit()
       assert.spy(vim.fn.jobstop).was_called_with(7)
     end)
 
-    it("skips pkill on Windows", function()
+    it("skips pkill on Windows and jobstops immediately", function()
       _G.__win32 = true
       cleanup.stop(7, "pkill_children")
       assert.spy(vim.fn.jobstart).was_not_called()
@@ -63,7 +95,10 @@ describe("claudecode.terminal.process_cleanup", function()
 
     it("defaults to pkill_children when strategy is nil", function()
       cleanup.stop(7, nil)
-      assert.spy(vim.fn.jobstart).was_called_with({ "pkill", "-TERM", "-P", "4242" }, { detach = true })
+      local cmd = jobstart_call()
+      assert.are.equal("sh", cmd[1])
+      assert.truthy(cmd[3]:match("pkill %-TERM %-P 4242"))
+      assert.spy(vim.fn.jobstop).was_not_called()
     end)
 
     it("none does nothing", function()
@@ -78,7 +113,7 @@ describe("claudecode.terminal.process_cleanup", function()
       assert.spy(vim.fn.jobstart).was_not_called()
     end)
 
-    it("does not spawn pkill when jobpid is invalid", function()
+    it("does not spawn pkill when jobpid is invalid, jobstops immediately", function()
       vim.fn.jobpid = function()
         return 0
       end
@@ -87,10 +122,29 @@ describe("claudecode.terminal.process_cleanup", function()
       assert.spy(vim.fn.jobstop).was_called_with(7)
     end)
 
-    it("never raises when jobpid errors", function()
+    it("never raises when jobpid errors, jobstops immediately", function()
       vim.fn.jobpid = function()
         error("no such job")
       end
+      assert.has_no.errors(function()
+        cleanup.stop(7, "pkill_children")
+      end)
+      assert.spy(vim.fn.jobstart).was_not_called()
+      assert.spy(vim.fn.jobstop).was_called_with(7)
+    end)
+
+    it("jobstart returning a non-positive job id falls back to an immediate jobstop", function()
+      vim.fn.jobstart = spy.new(function()
+        return 0
+      end)
+      cleanup.stop(7, "pkill_children")
+      assert.spy(vim.fn.jobstop).was_called_with(7)
+    end)
+
+    it("jobstart raising an error falls back to an immediate jobstop", function()
+      vim.fn.jobstart = spy.new(function()
+        error("jobstart failed")
+      end)
       assert.has_no.errors(function()
         cleanup.stop(7, "pkill_children")
       end)
