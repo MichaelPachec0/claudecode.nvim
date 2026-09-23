@@ -1,6 +1,6 @@
 # claudecode.nvim
 
-[![Tests](https://github.com/snirt/claudecode.nvim/actions/workflows/test.yml/badge.svg)](https://github.com/snirt/claudecode.nvim/actions/workflows/test.yml)
+[![Tests](https://github.com/coder/claudecode.nvim/actions/workflows/test.yml/badge.svg)](https://github.com/coder/claudecode.nvim/actions/workflows/test.yml)
 ![Neovim version](https://img.shields.io/badge/Neovim-0.8%2B-green)
 ![Status](https://img.shields.io/badge/Status-beta-blue)
 
@@ -20,9 +20,9 @@ When Anthropic released Claude Code, they only supported VS Code and JetBrains. 
 - ⚡ **First to Market** — Beat Anthropic to releasing Neovim support
 - 🛠️ **Built with AI** — Used Claude to reverse-engineer Claude's own protocol
 
-## Fork Features
+## Multi-session terminals
 
-This fork adds features not available in the original [coder/claudecode.nvim](https://github.com/coder/claudecode.nvim):
+Features for running and managing several Claude Code terminal sessions:
 
 ### Multi-Session Support
 
@@ -71,7 +71,7 @@ Three-state ESC handler for the Claude terminal:
 - **2× ESC** — forwarded as `<ESC><ESC>` (Claude rewind to previous prompt)
 - **3× ESC** — exit Neovim terminal-mode
 
-> **Migration note:** Upstream uses double-ESC to exit terminal-mode. In this fork, double-ESC is reserved for Claude's rewind. Use triple-ESC to exit.
+> **Note:** double-ESC is reserved for Claude's rewind, so use triple-ESC to exit terminal-mode.
 
 ### TUI Scroll-Back
 
@@ -117,7 +117,7 @@ terminal = {
 
 ```lua
 {
-  "snirt/claudecode.nvim",
+  "coder/claudecode.nvim",
   dependencies = { "folke/snacks.nvim" },
   config = true,
   -- `cmd` lets lazy.nvim create command stubs that load the plugin on first use,
@@ -213,7 +213,7 @@ If you have a local installation, configure the plugin with the direct path:
 
 ```lua
 {
-  "snirt/claudecode.nvim",
+  "coder/claudecode.nvim",
   dependencies = { "folke/snacks.nvim" },
   opts = {
     terminal_cmd = "~/.claude/local/claude", -- Point to local installation
@@ -272,7 +272,7 @@ Configure the plugin with the detected path:
 
 ```lua
 {
-  "snirt/claudecode.nvim",
+  "coder/claudecode.nvim",
   dependencies = { "folke/snacks.nvim" },
   opts = {
     terminal_cmd = "/path/to/your/claude", -- Use output from 'which claude'
@@ -296,7 +296,7 @@ A practical configuration with the most useful options:
 
 ```lua
 {
-  "snirt/claudecode.nvim",
+  "coder/claudecode.nvim",
   dependencies = { "folke/snacks.nvim" },
   opts = {
     -- Terminal as floating window (recommended)
@@ -508,7 +508,7 @@ For deep technical details, see [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ```lua
 {
-  "snirt/claudecode.nvim",
+  "coder/claudecode.nvim",
   dependencies = { "folke/snacks.nvim" },
   opts = {
     -- Server Configuration
@@ -708,7 +708,7 @@ The `snacks_win_opts` configuration allows you to create floating Claude Code te
 local toggle_key = "<C-,>"
 return {
   {
-    "snirt/claudecode.nvim",
+    "coder/claudecode.nvim",
     dependencies = { "folke/snacks.nvim" },
     keys = {
       { toggle_key, "<cmd>ClaudeCodeFocus<cr>", desc = "Claude Code", mode = { "n", "x" } },
@@ -745,7 +745,7 @@ return {
 local toggle_key = "<M-,>"  -- Alt/Meta + comma
 return {
   {
-    "snirt/claudecode.nvim",
+    "coder/claudecode.nvim",
     dependencies = { "folke/snacks.nvim" },
     keys = {
       { toggle_key, "<cmd>ClaudeCodeFocus<cr>", desc = "Claude Code", mode = { "n", "x" } },
@@ -797,7 +797,7 @@ require("claudecode").setup({
 
 ```lua
 {
-  "snirt/claudecode.nvim",
+  "coder/claudecode.nvim",
   dependencies = { "folke/snacks.nvim" },
   keys = {
     { "<C-,>", "<cmd>ClaudeCodeFocus<cr>", desc = "Claude Code (Ctrl+,)", mode = { "n", "x" } },
@@ -872,7 +872,7 @@ You have to take care of launching CC and connecting it to the IDE yourself. (e.
 
 ```lua
 {
-  "snirt/claudecode.nvim",
+  "coder/claudecode.nvim",
   opts = {
     terminal = {
       provider = "none", -- no UI actions; server + tools remain available
@@ -894,7 +894,7 @@ Run Claude Code in a separate terminal application outside of Neovim:
 ```lua
 -- Using a string template (simple)
 {
-  "snirt/claudecode.nvim",
+  "coder/claudecode.nvim",
   opts = {
     terminal = {
       provider = "external",
@@ -908,7 +908,7 @@ Run Claude Code in a separate terminal application outside of Neovim:
 
 -- Using a function for dynamic command generation (advanced)
 {
-  "snirt/claudecode.nvim",
+  "coder/claudecode.nvim",
   opts = {
     terminal = {
       provider = "external",
