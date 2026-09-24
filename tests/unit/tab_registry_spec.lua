@@ -138,6 +138,41 @@ describe("tab_registry", function()
     expect(tab_registry.session_for_tab(3)).to_be("session_c")
   end)
 
+  describe("rehome_invalid_tabs (D8)", function()
+    it("moves a closed tab's sessions into the landing tab without stealing its active", function()
+      tab_registry.bind(1, "session_a")
+      tab_registry.bind(2, "session_b")
+      tab_registry.bind(2, "session_b2")
+      valid_tabs[2] = nil
+
+      local moved = tab_registry.rehome_invalid_tabs(1)
+      table.sort(moved)
+      assert.are.same({ "session_b", "session_b2" }, moved)
+      expect(tab_registry.tab_for_session("session_b")).to_be(1)
+      expect(tab_registry.tab_for_session("session_b2")).to_be(1)
+      -- The landing tab keeps showing what it showed.
+      expect(tab_registry.session_for_tab(1)).to_be("session_a")
+      local owned = tab_registry.sessions_for_tab(1)
+      table.sort(owned)
+      assert.are.same({ "session_a", "session_b", "session_b2" }, owned)
+    end)
+
+    it("makes the closed tab's active session the landing tab's active when it has none", function()
+      tab_registry.bind(2, "session_b")
+      tab_registry.bind(2, "session_b2") -- active on tab 2
+      valid_tabs[2] = nil
+
+      tab_registry.rehome_invalid_tabs(3)
+      expect(tab_registry.session_for_tab(3)).to_be("session_b2")
+    end)
+
+    it("is a no-op when no tab was closed", function()
+      tab_registry.bind(1, "session_a")
+      assert.are.same({}, tab_registry.rehome_invalid_tabs(1))
+      expect(tab_registry.session_for_tab(1)).to_be("session_a")
+    end)
+  end)
+
   it("snapshot returns per-tab sessions plus active", function()
     tab_registry.bind(1, "session_a")
     tab_registry.bind(1, "session_b")

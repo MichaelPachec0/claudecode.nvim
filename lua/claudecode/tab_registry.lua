@@ -179,6 +179,35 @@ function M.prune_invalid_tabs()
   return orphaned
 end
 
+---Re-home the sessions of every closed tabpage into `landing_tab` (D8: a tab
+---close never kills Claude). The landing tab keeps its own active session when
+---it has one; otherwise the closed tab's active session becomes its active one.
+---@param landing_tab integer The tabpage the user landed in after the close
+---@return string[] rehomed_session_ids
+function M.rehome_invalid_tabs(landing_tab)
+  -- Remember each closed tab's active session before prune forgets it.
+  local was_active = {}
+  for tab, sid in pairs(tab_to_active) do
+    if not vim.api.nvim_tabpage_is_valid(tab) then
+      was_active[sid] = true
+    end
+  end
+  local orphaned = M.prune_invalid_tabs()
+  if #orphaned == 0 or not landing_tab then
+    return orphaned
+  end
+  local landing_active = M.session_for_tab(landing_tab)
+  for _, sid in ipairs(orphaned) do
+    session_to_tab[sid] = landing_tab
+    if not landing_active and was_active[sid] then
+      landing_active = sid
+    end
+  end
+  tab_to_active[landing_tab] = landing_active or orphaned[1]
+  logger.debug("tab_registry", "Re-homed", #orphaned, "session(s) into tab", landing_tab)
+  return orphaned
+end
+
 ---Reset registry. For tests.
 function M.reset()
   session_to_tab = {}

@@ -467,9 +467,12 @@ function M.setup(opts)
     desc = "Automatically stop Claude Code integration when exiting Neovim",
   })
 
-  -- Dispose Claude Code sessions whose owning tabpage was just closed.
+  -- D8: a tab close never kills Claude. With terminal.per_tab_sessions on, the
+  -- sessions owned by the closed tabpage are re-homed into the tabpage the user
+  -- lands in, so their processes and buffers stay reachable. With shared
+  -- sessions (the default) nothing is bound to a tab and nothing happens.
   -- Deferred via vim.schedule so Neovim has finished tearing the tabpage
-  -- down by the time we ask the registry which bindings are now orphaned.
+  -- down (and made the landing tab current) before the registry is consulted.
   vim.api.nvim_create_autocmd("TabClosed", {
     group = vim.api.nvim_create_augroup("ClaudeCodeTabLifecycle", { clear = true }),
     callback = function()
@@ -478,22 +481,11 @@ function M.setup(opts)
         if not ok_reg then
           return
         end
-        local orphaned = tab_registry.prune_invalid_tabs()
-        if #orphaned == 0 then
-          return
-        end
-        local ok_sm, session_manager = pcall(require, "claudecode.session")
-        if not ok_sm then
-          return
-        end
-        for _, sid in ipairs(orphaned) do
-          if session_manager.get_session(sid) then
-            session_manager.destroy_session(sid)
-          end
-        end
+        local ok_tab, landing = pcall(vim.api.nvim_get_current_tabpage)
+        tab_registry.rehome_invalid_tabs(ok_tab and landing or nil)
       end)
     end,
-    desc = "Dispose Claude Code sessions bound to closed tabpages",
+    desc = "Re-home Claude Code sessions from closed tabpages",
   })
 
   M.state.initialized = true
