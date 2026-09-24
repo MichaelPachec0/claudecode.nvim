@@ -21,6 +21,7 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
   local saved_modules
   local open_show_spy
   local last_split_cmd
+  local current_tab
 
   local function make_window(buf, opts)
     local id = next_win_id
@@ -28,6 +29,7 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
     windows[id] = {
       buf = buf,
       valid = true,
+      tab = current_tab,
       config = { relative = (opts and opts.relative) or "", hide = false },
     }
     return id
@@ -77,6 +79,7 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
     next_win_id = 1000
     next_buf_id = 1
     last_split_cmd = nil
+    current_tab = 1
 
     open_show_spy = spy.new(function(self)
       -- Snacks re-creates the window from the original opts (e.g. a float).
@@ -164,11 +167,11 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
         nvim_buf_get_var = function()
           error("no terminal_job_id in mock")
         end,
-        nvim_win_get_tabpage = function()
-          return 1
+        nvim_win_get_tabpage = function(w)
+          return windows[w] and windows[w].tab or 1
         end,
         nvim_get_current_tabpage = function()
-          return 1
+          return current_tab
         end,
         nvim_buf_is_valid = function(b)
           return b ~= nil and b >= 1
@@ -461,5 +464,34 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
     snacks_provider.open_session("s1", "claude", {}, split_config(), true)
     snacks_provider.simple_toggle("claude", {}, split_config())
     assert.is_not_nil(snacks_provider.get_session_bufnr("s1"))
+  end)
+
+  -- Shared sessions (per_tab_sessions = false): the same session is shown from
+  -- a second tabpage. It must appear in the current tabpage, not jump focus to
+  -- (or be treated as visible in) the tabpage where it was first opened.
+  it("split: showing a session from another tabpage opens a split here and keeps the other", function()
+    snacks_provider.open_session("s1", "claude", {}, split_config(), true)
+    local tab1_win = snacks_provider.get_session_window("s1")
+    current_tab = 2
+    current_win = make_window(99, { relative = "" })
+    snacks_provider.open_session("s1", "claude", {}, split_config(), true)
+    local here = snacks_provider.get_session_window("s1")
+    assert.is_not_nil(here)
+    assert.are_not.equal(tab1_win, here)
+    assert.are.equal(2, windows[here].tab)
+    assert.are.equal(here, current_win)
+    assert.is_true(windows[tab1_win].valid) -- tab 1 keeps its own split
+  end)
+
+  it("float: showing a session from another tabpage moves the float here", function()
+    snacks_provider.open_session("s1", "claude", {}, float_config(), true)
+    local tab1_win = snacks_provider.get_session_window("s1")
+    current_tab = 2
+    current_win = make_window(99, { relative = "" })
+    snacks_provider.open_session("s1", "claude", {}, float_config(), false)
+    local here = snacks_provider.get_session_window("s1")
+    assert.is_not_nil(here)
+    assert.are.equal(2, windows[here].tab)
+    assert.is_false(windows[tab1_win].valid) -- a float belongs to one tabpage
   end)
 end)

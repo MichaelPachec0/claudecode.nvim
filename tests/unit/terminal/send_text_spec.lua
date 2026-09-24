@@ -325,7 +325,8 @@ describe("terminal.send_to_terminal (#197)", function()
       assert.are.equal(1, chansend_calls[1].chan)
     end)
 
-    it("routes to the current tab's active session, not another tab's", function()
+    it("routes to the current tab's active session, not another tab's (per_tab_sessions = true)", function()
+      tab_registry.set_per_tab_enabled(true)
       local original_get_current_tabpage = vim.api.nvim_get_current_tabpage
       local current_tab = 1
       vim.api.nvim_get_current_tabpage = function()

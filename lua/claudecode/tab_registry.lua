@@ -17,6 +17,25 @@ local session_to_tab = {}
 ---@type table<integer, string>
 local tab_to_active = {}
 
+---Whether sessions are scoped to tabpages (terminal.per_tab_sessions). When
+---false (the default, upstream behavior) there is one shared session set:
+---nothing is bound to a tab, so every lookup here comes back empty and callers
+---fall back to the global active session.
+---@type boolean
+local per_tab_enabled = false
+
+---Enable or disable per-tab session scoping (set from terminal.setup).
+---@param enabled boolean
+function M.set_per_tab_enabled(enabled)
+  per_tab_enabled = enabled == true
+end
+
+---True when terminal.per_tab_sessions is on.
+---@return boolean
+function M.is_per_tab_enabled()
+  return per_tab_enabled
+end
+
 ---Look up the tab that owns a session.
 ---@param session_id string
 ---@return integer|nil tabpage
@@ -164,6 +183,7 @@ end
 function M.reset()
   session_to_tab = {}
   tab_to_active = {}
+  per_tab_enabled = false
 end
 
 ---Snapshot for inspection: { tab → { active=sid, sessions={sid,...} } }.

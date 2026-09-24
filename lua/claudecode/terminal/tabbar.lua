@@ -74,12 +74,17 @@ local function resolve_tab(tabpage)
   return nil
 end
 
----List sessions owned by a specific tabpage. Strictly tab-scoped.
+---List the sessions a tabpage shows. Strictly tab-scoped with
+---terminal.per_tab_sessions on; otherwise every session (they are shared by
+---all tabpages).
 ---@param tabpage integer
 ---@return ClaudeCodeSession[]
 local function list_sessions_for(tabpage)
   local sm = get_session_manager()
   local reg = get_tab_registry()
+  if not reg.is_per_tab_enabled() then
+    return sm.list_sessions()
+  end
   local result = {}
   for _, session in ipairs(sm.list_sessions()) do
     if reg.tab_for_session(session.id) == tabpage then
@@ -87,6 +92,18 @@ local function list_sessions_for(tabpage)
     end
   end
   return result
+end
+
+---Active session for a tabpage: the tab's own active session with
+---terminal.per_tab_sessions on, otherwise the shared global active session.
+---@param tabpage integer
+---@return string|nil session_id
+local function active_for(tabpage)
+  local reg = get_tab_registry()
+  if reg.is_per_tab_enabled() then
+    return reg.session_for_tab(tabpage)
+  end
+  return get_session_manager().get_active_session_id()
 end
 
 -- ============================================================================
@@ -117,7 +134,7 @@ end
 local function build_content(tabpage)
   local slot = get_tab_state(tabpage)
   local sessions = list_sessions_for(tabpage)
-  local active_id = get_tab_registry().session_for_tab(tabpage)
+  local active_id = active_for(tabpage)
 
   slot.click_regions = {}
 
@@ -275,7 +292,7 @@ local function handle_scroll(tabpage, direction)
   if #sessions <= 1 then
     return
   end
-  local active_id = get_tab_registry().session_for_tab(tabpage)
+  local active_id = active_for(tabpage)
   for i, session in ipairs(sessions) do
     if session.id == active_id then
       local next_idx
@@ -529,7 +546,7 @@ function M.render_winbar(tabpage)
   end
 
   local sessions = list_sessions_for(tabpage)
-  local active_id = get_tab_registry().session_for_tab(tabpage)
+  local active_id = active_for(tabpage)
   if #sessions == 0 then
     return
   end
@@ -606,7 +623,7 @@ function M.setup_keymaps(bufnr)
       if #sessions <= 1 then
         return
       end
-      local active_id = get_tab_registry().session_for_tab(tab)
+      local active_id = active_for(tab)
       for i, session in ipairs(sessions) do
         if session.id == active_id then
           local next_idx = (i % #sessions) + 1
@@ -627,7 +644,7 @@ function M.setup_keymaps(bufnr)
       if #sessions <= 1 then
         return
       end
-      local active_id = get_tab_registry().session_for_tab(tab)
+      local active_id = active_for(tab)
       for i, session in ipairs(sessions) do
         if session.id == active_id then
           local prev_idx = ((i - 2) % #sessions) + 1
@@ -650,7 +667,7 @@ function M.setup_keymaps(bufnr)
       if not tab then
         return
       end
-      local active_id = get_tab_registry().session_for_tab(tab)
+      local active_id = active_for(tab)
       if active_id then
         terminal_mod().close_session(active_id)
       end
@@ -762,7 +779,7 @@ local function setup_autocmds()
       if not ok or not tab then
         return
       end
-      local sid = get_tab_registry().session_for_tab(tab)
+      local sid = active_for(tab)
       if not sid then
         return
       end

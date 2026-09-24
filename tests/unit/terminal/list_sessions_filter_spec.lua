@@ -1,7 +1,7 @@
 -- luacheck: globals expect
 require("tests.busted_setup")
 
-describe("terminal.list_sessions_for_current_tab", function()
+describe("terminal.list_sessions_for_current_tab (per_tab_sessions = true)", function()
   local terminal
   local session_manager
   local tab_registry
@@ -21,6 +21,9 @@ describe("terminal.list_sessions_for_current_tab", function()
     terminal = require("claudecode.terminal")
     session_manager.reset()
     tab_registry.reset()
+    -- These specs cover the opt-in per-tab isolation (D7); the shared default
+    -- is covered in shared_sessions_spec.lua.
+    tab_registry.set_per_tab_enabled(true)
 
     current_tab = 1
     original_get_current_tabpage = vim.api.nvim_get_current_tabpage

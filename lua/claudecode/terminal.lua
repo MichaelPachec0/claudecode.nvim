@@ -79,11 +79,20 @@ function M.unregister_buffer_session(bufnr)
   end
 end
 
+---True when terminal.per_tab_sessions is on: each tabpage owns its own
+---sessions. False (the default) keeps upstream's single shared session set, so
+---every tabpage resolves the global active session instead of spawning its own.
+---@return boolean
+local function per_tab()
+  return tab_registry.is_per_tab_enabled()
+end
+
 ---Bind a session to the current Neovim tabpage so subsequent open/toggle/picker
----calls in that tab route to it. Idempotent.
+---calls in that tab route to it. Idempotent. A no-op unless per_tab_sessions
+---is on: shared sessions are never tied to a tab.
 ---@param session_id string
 function M._bind_to_current_tab(session_id)
-  if not session_id then
+  if not session_id or not per_tab() then
     return
   end
   local ok, tab = pcall(vim.api.nvim_get_current_tabpage)
@@ -92,15 +101,22 @@ function M._bind_to_current_tab(session_id)
   end
 end
 
----Resolve the session bound to the current tabpage, if any, including a check
----that the session record actually still exists.
+---Resolve the session the current tabpage should show, including a check that
+---the session record actually still exists. With per_tab_sessions on this is
+---the session bound to the current tab; otherwise it is the global active
+---session, whichever tab it was opened from.
 ---@return string|nil session_id, ClaudeCodeSession|nil session
 local function current_tab_session()
-  local ok, tab = pcall(vim.api.nvim_get_current_tabpage)
-  if not ok or not tab then
-    return nil, nil
+  local sid
+  if per_tab() then
+    local ok, tab = pcall(vim.api.nvim_get_current_tabpage)
+    if not ok or not tab then
+      return nil, nil
+    end
+    sid = tab_registry.session_for_tab(tab)
+  else
+    sid = session_manager.get_active_session_id()
   end
-  local sid = tab_registry.session_for_tab(tab)
   if not sid then
     return nil, nil
   end
@@ -111,19 +127,56 @@ local function current_tab_session()
   return sid, sess
 end
 
----True when the current tab owns a session whose terminal buffer is still alive.
+---True when the current tab's session has a terminal buffer that is still alive.
 ---@return boolean
 local function current_tab_has_live_terminal()
   local _, sess = current_tab_session()
   return sess ~= nil and sess.terminal_bufnr ~= nil and vim.api.nvim_buf_is_valid(sess.terminal_bufnr)
 end
 
+---Session ids the current tabpage may show, active one first: the tab's own
+---sessions with per_tab_sessions on, otherwise every session.
+---@param tab integer
+---@return string[]
+local function candidate_sessions_for_tab(tab)
+  local ids = {}
+  local seen = {}
+  local function add(sid)
+    if sid and not seen[sid] then
+      seen[sid] = true
+      table.insert(ids, sid)
+    end
+  end
+  if per_tab() then
+    add(tab_registry.session_for_tab(tab))
+    for _, sid in ipairs(tab_registry.sessions_for_tab(tab)) do
+      add(sid)
+    end
+  else
+    add(session_manager.get_active_session_id())
+    for _, s in ipairs(session_manager.list_sessions()) do
+      add(s.id)
+    end
+  end
+  return ids
+end
+
+---True when `win` lives in tabpage `tab`.
+---@param win number
+---@param tab integer
+---@return boolean
+local function win_in_tab(win, tab)
+  local ok, win_tab = pcall(vim.api.nvim_win_get_tabpage, win)
+  return ok and win_tab == tab
+end
+
 ---For a provider that owns its session windows (exposes get_session_window,
----e.g. Snacks park/unpark), find the current tab's session that is actually on
----screen. Every session the tab owns is checked, not only the tab's active
+---e.g. Snacks park/unpark), find the session that is actually on screen in the
+---current tabpage. Every candidate session is checked, not only the active
 ---pointer: that pointer can name a parked session (e.g. after a session close
 ---promoted another one), and trusting it would swap sessions instead of
----hiding the visible one.
+---hiding the visible one. A window in another tabpage does not count: with
+---shared sessions the same session may be on screen in a different tab.
 ---@param provider table The terminal provider module
 ---@return string|nil session_id, number|nil winid
 local function visible_tab_session(provider)
@@ -134,16 +187,9 @@ local function visible_tab_session(provider)
   if not ok or not tab then
     return nil, nil
   end
-  local active = tab_registry.session_for_tab(tab)
-  if active then
-    local win = provider.get_session_window(active)
-    if win then
-      return active, win
-    end
-  end
-  for _, sid in ipairs(tab_registry.sessions_for_tab(tab)) do
+  for _, sid in ipairs(candidate_sessions_for_tab(tab)) do
     local win = provider.get_session_window(sid)
-    if win then
+    if win and win_in_tab(win, tab) then
       return sid, win
     end
   end
@@ -173,8 +219,11 @@ local function finalize_session_terminal(session_id, bufnr, provider)
   return session_id
 end
 
----Ensure the current tab has a session, creating and binding one if not.
----Returns the session id and whether it was newly created.
+---Ensure the current tab has a session to show, creating (and, with
+---per_tab_sessions on, binding) one if not. With shared sessions (the default)
+---this reuses the global active session from any tab, so a second tabpage
+---never spawns a second Claude. Returns the session id and whether it was
+---newly created.
 ---@return string session_id, boolean newly_created
 local function ensure_current_tab_session()
   local sid = current_tab_session()
@@ -244,6 +293,10 @@ local defaults = {
   -- true: <ScrollWheelUp> exits terminal mode so you can view Neovim's scrollback buffer.
   --   <ScrollWheelDown> in normal mode auto-returns to terminal mode at the last line.
   scroll_up_enabled = false,
+  -- Per-tab sessions: false (default) keeps one shared set of sessions across all
+  -- tabpages (upstream behavior; a second tab shows the same Claude). true gives
+  -- each tabpage its own sessions.
+  per_tab_sessions = false,
   -- Split navigation: Ctrl+h/j/k/l to move between splits from terminal mode.
   -- false (default): no split-navigation keymaps are installed (upstream behaviour).
   split_navigation = false,
@@ -1164,8 +1217,9 @@ local function get_claude_command_and_env(cmd_args)
 end
 
 ---Common helper to open terminal without focus if not already visible.
----Per-tab: targets the session bound to the current tab; creates and binds a
----fresh session if the tab has none.
+---Targets the current tab's session (see ensure_current_tab_session): the
+---tab's own session with per_tab_sessions on, otherwise the shared active
+---session, shown in the current tab. Creates one only when none exists.
 ---@param opts_override table? Optional config overrides
 ---@param cmd_args string? Optional command arguments
 ---@return boolean visible True if terminal was opened or already visible
@@ -1173,7 +1227,7 @@ local function ensure_terminal_visible_no_focus(opts_override, cmd_args)
   local provider = get_provider()
 
   -- Provider-managed visibility (e.g. snacks `ensure_visible`) bypasses our
-  -- per-tab logic for now; rely on the provider knowing what to do.
+  -- session logic; rely on the provider knowing what to do.
   if provider.ensure_visible then
     provider.ensure_visible()
     return true
@@ -1183,7 +1237,7 @@ local function ensure_terminal_visible_no_focus(opts_override, cmd_args)
   local cmd_string, claude_env_table = get_claude_command_and_env(cmd_args)
 
   if provider.open_session then
-    -- Per-tab path. A live terminal can still be hidden (native: managed
+    -- Session-aware path. A live terminal can still be hidden (native: managed
     -- window closed by a toggle; Snacks: parked float or closed split). Only
     -- skip when it is actually on screen; otherwise re-show it without focus.
     if provider.get_session_window then
@@ -1494,6 +1548,15 @@ function M.setup(user_term_config, p_terminal_cmd, p_env)
           vim.log.levels.WARN
         )
       end
+    elseif k == "per_tab_sessions" then
+      if type(v) == "boolean" then
+        defaults.per_tab_sessions = v
+      else
+        vim.notify(
+          "claudecode.terminal.setup: Invalid value for per_tab_sessions: " .. tostring(v) .. ". Must be a boolean.",
+          vim.log.levels.WARN
+        )
+      end
     elseif k == "tui_keymaps" then
       if type(v) == "boolean" then
         defaults.tui_keymaps = v
@@ -1518,6 +1581,8 @@ function M.setup(user_term_config, p_terminal_cmd, p_env)
       end
     end
   end
+
+  tab_registry.set_per_tab_enabled(defaults.per_tab_sessions)
 
   setup_buffer_cleanup_autocmd()
 
@@ -1557,7 +1622,7 @@ function M.open(opts_override, cmd_args)
   local provider = get_provider()
 
   if provider.open_session then
-    -- Per-tab path: route through the session-aware provider API.
+    -- Session-aware path: route through the session-aware provider API.
     local session_id, newly_created = ensure_current_tab_session()
     provider.open_session(session_id, cmd_string, claude_env_table, effective_config, true)
     if newly_created then
@@ -1602,7 +1667,7 @@ function M.simple_toggle(opts_override, cmd_args)
   local provider = get_provider()
 
   if provider.open_session then
-    -- Per-tab path
+    -- Session-aware path
     if provider.hide_session then
       -- Provider owns its windows (Snacks park/unpark): hide through it so a
       -- float is config-hidden rather than destroyed (climbing cursor, #271).
@@ -2140,11 +2205,16 @@ function M.list_sessions()
   return session_manager.list_sessions()
 end
 
----Lists sessions owned by the current Neovim tabpage.
----Strictly tab-scoped: a session must have an explicit registry binding to the
----current tab to be returned. Unbound sessions never leak into other tabs.
+---Lists the sessions the current Neovim tabpage works with. With
+---per_tab_sessions on this is strictly tab-scoped: a session must have an
+---explicit registry binding to the current tab to be returned, and unbound
+---sessions never leak into other tabs. Otherwise (the default) every session
+---is shared by all tabs and all of them are returned.
 ---@return ClaudeCodeSession[] sessions Tab-scoped list (empty array when no session belongs to the current tab)
 function M.list_sessions_for_current_tab()
+  if not per_tab() then
+    return session_manager.list_sessions()
+  end
   local ok, tab = pcall(vim.api.nvim_get_current_tabpage)
   if not ok or not tab then
     return {}

@@ -153,6 +153,18 @@ local function reapply_snacks_window_state(term, win)
   end)
 end
 
+---True when `win` lives in the current tabpage.
+---@param win number|nil
+---@return boolean
+local function win_in_current_tab(win)
+  if not (win and vim.api.nvim_win_is_valid(win)) then
+    return false
+  end
+  local ok_win, win_tab = pcall(vim.api.nvim_win_get_tabpage, win)
+  local ok_cur, cur_tab = pcall(vim.api.nvim_get_current_tabpage)
+  return ok_win and ok_cur and win_tab == cur_tab
+end
+
 ---Hide the terminal window without disturbing the cursor anchor.
 ---@param term table Snacks terminal instance
 local function cc_hide(term)
@@ -205,6 +217,31 @@ local function cc_show(term, focus, config)
   end
   local logger = require("claudecode.logger")
   local win = term.win
+
+  -- Shared sessions (terminal.per_tab_sessions = false): the instance can be on
+  -- screen, or parked, in another tabpage. Show it in this tabpage instead of
+  -- jumping to that one. A float belongs to a single tabpage, so it is closed
+  -- there and recreated here. A split is left in place (as the native provider
+  -- does) and a new one is opened here.
+  if win and vim.api.nvim_win_is_valid(win) and not win_in_current_tab(win) then
+    if win_is_floating(win) then
+      logger.debug("terminal", "Snacks show: moving float from another tabpage")
+      if term.backdrop and term.backdrop.win and vim.api.nvim_win_is_valid(term.backdrop.win) then
+        pcall(vim.api.nvim_win_close, term.backdrop.win, true)
+      end
+      pcall(vim.api.nvim_win_close, win, true)
+      if term._cc then
+        term._cc.kind = "float"
+      end
+    else
+      logger.debug("terminal", "Snacks show: opening a split here; the other tabpage keeps its own")
+      if term._cc then
+        term._cc.kind = "split"
+      end
+    end
+    term.win = nil
+    win = nil
+  end
 
   -- Config-hidden float -> just un-hide it.
   if win and vim.api.nvim_win_is_valid(win) and win_is_config_hidden(win) then
@@ -326,18 +363,6 @@ end
 -- switch parks the outgoing instance (cc_hide) and unparks the target
 -- (cc_show), so each instance keeps its window/cursor anchor across switches.
 -- ---------------------------------------------------------------------------
-
----True when `win` lives in the current tabpage.
----@param win number|nil
----@return boolean
-local function win_in_current_tab(win)
-  if not (win and vim.api.nvim_win_is_valid(win)) then
-    return false
-  end
-  local ok_win, win_tab = pcall(vim.api.nvim_win_get_tabpage, win)
-  local ok_cur, cur_tab = pcall(vim.api.nvim_get_current_tabpage)
-  return ok_win and ok_cur and win_tab == cur_tab
-end
 
 ---Park every visible session instance in the current tabpage except `keep`.
 ---Instances shown in other tabpages belong to those tabs' sessions and are
@@ -587,11 +612,14 @@ end
 local function build_initial_title(session_id)
   local sm = require("claudecode.session")
   local reg = require("claudecode.tab_registry")
-  -- Title in tab N's terminal should reflect tab N's sessions only; strictly
-  -- tab-scoped, no fallthrough for unbound sessions.
+  -- With per_tab_sessions on, the title in tab N's terminal reflects tab N's
+  -- sessions only (strictly tab-scoped, no fallthrough for unbound sessions).
+  -- Otherwise every session is shared by all tabs and all of them are listed.
   local ok_tab, current_tab = pcall(vim.api.nvim_get_current_tabpage)
   local sessions = {}
-  if ok_tab and current_tab then
+  if not reg.is_per_tab_enabled() then
+    sessions = sm.list_sessions()
+  elseif ok_tab and current_tab then
     for _, s in ipairs(sm.list_sessions()) do
       if reg.tab_for_session(s.id) == current_tab then
         table.insert(sessions, s)

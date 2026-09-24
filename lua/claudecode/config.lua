@@ -146,6 +146,12 @@ function M.validate(config)
     "terminal.tui_keymaps must be a boolean"
   )
 
+  -- Validate per_tab_sessions if present (D7: opt-in per-tabpage session isolation)
+  assert(
+    config.terminal.per_tab_sessions == nil or type(config.terminal.per_tab_sessions) == "boolean",
+    "terminal.per_tab_sessions must be a boolean"
+  )
+
   -- Validate cleanup_strategy if present
   if config.terminal.cleanup_strategy ~= nil then
     local valid_strategies = { "pkill_children", "jobstop_only", "aggressive", "none" }
