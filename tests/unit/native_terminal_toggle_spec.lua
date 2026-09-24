@@ -469,6 +469,96 @@ describe("claudecode.terminal.native toggle behavior", function()
     end)
   end)
 
+  describe("replacement session on exit (I4)", function()
+    local session_manager
+    local tab_registry
+
+    before_each(function()
+      package.loaded["claudecode.terminal.osc_handler"] = {
+        setup_buffer_handler = function() end,
+        cleanup_buffer_handler = function() end,
+      }
+      package.loaded["claudecode.terminal.native"] = nil
+      native_provider = require("claudecode.terminal.native")
+      native_provider.setup({})
+      session_manager = require("claudecode.session")
+      tab_registry = require("claudecode.tab_registry")
+      session_manager.reset()
+      tab_registry.reset()
+    end)
+
+    local cfg = { auto_close = true }
+
+    local function open(sid)
+      native_provider.open_session(sid, "claude", {}, cfg, true)
+      local state = _G.get_mock_state()
+      return state.termopen_calls[#state.termopen_calls].jobid
+    end
+
+    local function exit_job(jobid)
+      local state = _G.get_mock_state()
+      state.job_exit_callbacks[jobid](jobid, 0, "exit")
+    end
+
+    local function shown_bufs()
+      local bufs = {}
+      for _, win in pairs(_G.get_mock_state().windows) do
+        bufs[win.bufnr] = true
+      end
+      return bufs
+    end
+
+    it("per-tab: never shows another tab's session in place of the exited one", function()
+      tab_registry.set_per_tab_enabled(true)
+      local s1 = session_manager.create_session()
+      local s2 = session_manager.create_session()
+      tab_registry.bind(1, s1)
+      tab_registry.bind(2, s2)
+      local j1 = open(s1)
+      open(s2)
+      local s2_buf = native_provider.get_session_bufnr(s2)
+      native_provider.focus_session(s1, cfg) -- tab 1 shows s1
+
+      exit_job(j1)
+
+      assert.is_nil(shown_bufs()[s2_buf], "tab 2's session must not be pulled into tab 1")
+      assert.is_not_nil(native_provider.get_session_bufnr(s2)) -- s2 itself untouched
+    end)
+
+    it("per-tab: replaces the exited session with another session of the same tab", function()
+      tab_registry.set_per_tab_enabled(true)
+      local s1 = session_manager.create_session()
+      local s2 = session_manager.create_session()
+      local s3 = session_manager.create_session()
+      tab_registry.bind(1, s1)
+      tab_registry.bind(2, s2)
+      tab_registry.bind(1, s3)
+      local j1 = open(s1)
+      open(s2)
+      open(s3)
+      session_manager.set_active_session(s2) -- global pointer names tab 2's session
+      native_provider.focus_session(s1, cfg)
+
+      exit_job(j1)
+
+      local s3_buf = native_provider.get_session_bufnr(s3)
+      assert.is_true(shown_bufs()[s3_buf] == true)
+      assert.is_nil(shown_bufs()[native_provider.get_session_bufnr(s2)])
+    end)
+
+    it("shared sessions: replaces the exited session with another session", function()
+      local s1 = session_manager.create_session()
+      local s2 = session_manager.create_session()
+      local j1 = open(s1)
+      open(s2)
+      native_provider.focus_session(s1, cfg)
+
+      exit_job(j1)
+
+      assert.is_true(shown_bufs()[native_provider.get_session_bufnr(s2)] == true)
+    end)
+  end)
+
   describe("simple_toggle behavior", function()
     -- "should always hide terminal when visible, regardless of focus" and
     -- "should show hidden terminal when toggled" are now window_manager

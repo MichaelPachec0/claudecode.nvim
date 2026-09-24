@@ -411,6 +411,39 @@ local function close_instance_window(term)
   end
 end
 
+---Pick the session to show in place of an exited one. With per_tab_sessions
+---on, only sessions owned by the exited session's tabpage qualify; otherwise
+---any session does, the global active one first. Only a session's own live
+---instance is ever returned.
+---@param exited_sid string|nil
+---@param owner_tab integer|nil Owner tabpage captured at exit time
+---@return string|nil session_id, table|nil term_instance
+local function pick_replacement(exited_sid, owner_tab)
+  local reg = require("claudecode.tab_registry")
+  local candidates = {}
+  if reg.is_per_tab_enabled() then
+    if not owner_tab then
+      return nil, nil
+    end
+    table.insert(candidates, reg.session_for_tab(owner_tab))
+    for _, sid in ipairs(reg.sessions_for_tab(owner_tab)) do
+      table.insert(candidates, sid)
+    end
+  else
+    table.insert(candidates, session_manager.get_active_session_id())
+    for _, s in ipairs(session_manager.list_sessions()) do
+      table.insert(candidates, s.id)
+    end
+  end
+  for _, sid in ipairs(candidates) do
+    local term = sid and sid ~= exited_sid and terminals[sid]
+    if term and term:buf_valid() then
+      return sid, term
+    end
+  end
+  return nil, nil
+end
+
 ---Setup event handlers for terminal instance
 ---@param term_instance table The Snacks terminal instance
 ---@param config table Configuration options
@@ -465,6 +498,14 @@ local function setup_terminal_events(term_instance, config, session_id)
 
       -- Track the exited session ID for cleanup
       local exited_session_id = session_id
+      if not exited_session_id and term_instance.buf then
+        local legacy_session = session_manager.find_session_by_bufnr(term_instance.buf)
+        exited_session_id = legacy_session and legacy_session.id or nil
+      end
+      -- Capture the owner tabpage now, before the session is destroyed and
+      -- unbound (and before the user can switch tabs).
+      local owner_tab = exited_session_id and require("claudecode.tab_registry").tab_for_session(exited_session_id)
+        or nil
 
       -- Clean up terminal state
       if session_id then
@@ -479,7 +520,6 @@ local function setup_terminal_events(term_instance, config, session_id)
         if term_instance.buf then
           local session = session_manager.find_session_by_bufnr(term_instance.buf)
           if session then
-            exited_session_id = session.id
             logger.debug("terminal", "Destroying session for exited terminal: " .. session.id)
             if session_manager.get_session(session.id) then
               session_manager.destroy_session(session.id)
@@ -503,45 +543,25 @@ local function setup_terminal_events(term_instance, config, session_id)
           pcall(vim.api.nvim_buf_delete, exited_buf, { force = true })
         end
 
-        -- If there are other sessions, switch to the new active session
+        -- If there are other sessions, switch to a replacement. Only a session
+        -- whose own instance is live qualifies (never another session's
+        -- terminal), and with per_tab_sessions on only one owned by the exited
+        -- session's tabpage.
         if session_count > 1 then
-          local new_active_id = session_manager.get_active_session_id()
-          if new_active_id then
-            local new_term = terminals[new_active_id]
-
-            -- Fallback: check if any other terminal in our table is valid
-            if not new_term or not new_term:buf_valid() then
-              for sid, term in pairs(terminals) do
-                if sid ~= exited_session_id and term and term:buf_valid() then
-                  new_term = term
-                  terminals[new_active_id] = new_term
-                  logger.debug("terminal", "Recovered terminal from table for session: " .. new_active_id)
-                  break
-                end
-              end
+          local new_id, new_term = pick_replacement(exited_session_id, owner_tab)
+          if new_id and new_term then
+            terminal = new_term
+            -- Keep the session manager and the tab's active pointer on the
+            -- session that is now in front.
+            session_manager.set_active_session(new_id)
+            local per_tab = require("claudecode.tab_registry").is_per_tab_enabled()
+            local in_owner_tab = not per_tab or owner_tab == nil or owner_tab == vim.api.nvim_get_current_tabpage()
+            if was_visible and in_owner_tab then
+              -- Unpark the replacement in place of the exited one.
+              cc_show(new_term, true, config)
+              attach_tabbar(new_term)
             end
-
-            -- Fallback: check the global terminal variable
-            if not new_term or not new_term:buf_valid() then
-              if terminal and terminal:buf_valid() and terminal ~= term_instance then
-                new_term = terminal
-                terminals[new_active_id] = new_term
-                logger.debug("terminal", "Recovered global terminal for session: " .. new_active_id)
-              end
-            end
-
-            if new_term and new_term:buf_valid() then
-              terminal = new_term
-              -- Keep the session manager and the tab's active pointer on the
-              -- session that is now in front.
-              session_manager.set_active_session(new_active_id)
-              if was_visible then
-                -- Unpark the new active session in place of the exited one.
-                cc_show(new_term, true, config)
-                attach_tabbar(new_term)
-              end
-              logger.debug("terminal", "Switched to session " .. new_active_id)
-            end
+            logger.debug("terminal", "Switched to session " .. new_id)
           end
         end
 

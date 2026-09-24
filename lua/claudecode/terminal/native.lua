@@ -39,6 +39,91 @@ local function is_valid()
   return true
 end
 
+---@return table tab_registry module (lazy: avoids a require cycle at load time)
+local function tab_registry()
+  return require("claudecode.tab_registry")
+end
+
+---Pick the session to show in place of an exited one. With per_tab_sessions
+---on, only sessions owned by the exited session's tabpage qualify (another
+---tab's session is never pulled in). Otherwise any session does, the global
+---active one first. Only sessions with a live terminal in this provider count.
+---@param exited_sid string|nil
+---@param owner_tab integer|nil Owner tabpage captured at exit time
+---@return string|nil session_id, NativeTerminalState|nil state
+local function pick_replacement(exited_sid, owner_tab)
+  local reg = tab_registry()
+  local candidates = {}
+  if reg.is_per_tab_enabled() then
+    if not owner_tab then
+      return nil, nil
+    end
+    table.insert(candidates, reg.session_for_tab(owner_tab))
+    for _, sid in ipairs(reg.sessions_for_tab(owner_tab)) do
+      table.insert(candidates, sid)
+    end
+  else
+    table.insert(candidates, session_manager.get_active_session_id())
+    for _, s in ipairs(session_manager.list_sessions()) do
+      table.insert(candidates, s.id)
+    end
+  end
+  for _, sid in ipairs(candidates) do
+    local st = sid and sid ~= exited_sid and terminals[sid]
+    if st and st.bufnr and vim.api.nvim_buf_is_valid(st.bufnr) then
+      return sid, st
+    end
+  end
+  return nil, nil
+end
+
+---After a session's process exited (auto_close): show a replacement session in
+---the managed window, or close the window when there is none. With
+---per_tab_sessions on and the exited session owned by a tabpage other than the
+---current one, the replacement only becomes that tab's active session; nothing
+---is displayed in the current tab.
+---@param exited_sid string|nil
+---@param owner_tab integer|nil Owner tabpage captured at exit time
+---@param exited_bufnr number|nil The exited terminal's buffer, deleted afterwards
+---@param keep_buf_on_close boolean|nil Legacy path: leave the buffer when closing the window
+local function show_replacement_or_close(exited_sid, owner_tab, exited_bufnr, keep_buf_on_close)
+  local window_manager = require("claudecode.terminal.window_manager")
+  local new_sid, new_state = pick_replacement(exited_sid, owner_tab)
+  local other_tab = tab_registry().is_per_tab_enabled()
+    and owner_tab ~= nil
+    and owner_tab ~= vim.api.nvim_get_current_tabpage()
+
+  if new_sid and new_state and other_tab then
+    session_manager.set_active_session(new_sid)
+  elseif new_sid and new_state then
+    window_manager.display_buffer(new_state.bufnr, true)
+    session_manager.set_active_session(new_sid)
+
+    -- Update legacy state
+    bufnr = new_state.bufnr
+    jobid = new_state.jobid
+
+    -- Re-attach tabbar
+    local winid = window_manager.get_window()
+    if winid then
+      local ok, tabbar = pcall(require, "claudecode.terminal.tabbar")
+      if ok then
+        tabbar.attach(winid, new_state.bufnr)
+      end
+    end
+  elseif not other_tab then
+    -- No replacement: close the window
+    window_manager.close_window()
+    if keep_buf_on_close then
+      return
+    end
+  end
+
+  if exited_bufnr and vim.api.nvim_buf_is_valid(exited_bufnr) then
+    vim.api.nvim_buf_delete(exited_bufnr, { force = true })
+  end
+end
+
 ---Create a new terminal buffer (without window)
 ---@param cmd_string string Command to run
 ---@param env_table table Environment variables
@@ -47,8 +132,6 @@ end
 ---@return number|nil bufnr The buffer number or nil on failure
 ---@return number|nil jobid The job ID or nil on failure
 local function create_terminal_buffer(cmd_string, env_table, effective_config, session_id)
-  local window_manager = require("claudecode.terminal.window_manager")
-
   -- Create a new buffer
   local new_bufnr = vim.api.nvim_create_buf(false, true)
   if not new_bufnr or new_bufnr == 0 then
@@ -105,6 +188,15 @@ local function create_terminal_buffer(cmd_string, env_table, effective_config, s
         -- which cleanup_all would then signal. Jobs still alive at
         -- VimLeavePre have not exited, so they are still tracked there.
         terminal_module.untrack_terminal_pid(job_id)
+        -- Capture the exited session's owner tabpage now, at exit time: by
+        -- the time the scheduled handler runs the session may be destroyed
+        -- and unbound, or the user may have switched tabs.
+        local exited_sid = session_id
+        if not exited_sid and job_id == jobid then
+          local legacy_session = session_manager.find_session_by_bufnr(bufnr)
+          exited_sid = legacy_session and legacy_session.id or nil
+        end
+        local owner_tab = exited_sid and tab_registry().tab_for_session(exited_sid) or nil
         vim.schedule(function()
           -- For multi-session
           if session_id then
@@ -119,7 +211,6 @@ local function create_terminal_buffer(cmd_string, env_table, effective_config, s
                 osc_handler.cleanup_buffer_handler(current_bufnr)
               end
 
-              local session_count = session_manager.get_session_count()
               terminals[session_id] = nil
 
               if session_manager.get_session(session_id) then
@@ -130,41 +221,7 @@ local function create_terminal_buffer(cmd_string, env_table, effective_config, s
                 return
               end
 
-              -- If there are other sessions, switch to the new active session
-              if session_count > 1 then
-                local new_active_id = session_manager.get_active_session_id()
-                if new_active_id then
-                  local new_state = terminals[new_active_id]
-                  if new_state and new_state.bufnr and vim.api.nvim_buf_is_valid(new_state.bufnr) then
-                    window_manager.display_buffer(new_state.bufnr, true)
-
-                    -- Update legacy state
-                    bufnr = new_state.bufnr
-                    jobid = new_state.jobid
-
-                    -- Re-attach tabbar
-                    local winid = window_manager.get_window()
-                    if winid then
-                      local ok, tabbar = pcall(require, "claudecode.terminal.tabbar")
-                      if ok then
-                        tabbar.attach(winid, new_state.bufnr)
-                      end
-                    end
-
-                    -- Delete old buffer
-                    if current_bufnr and vim.api.nvim_buf_is_valid(current_bufnr) then
-                      vim.api.nvim_buf_delete(current_bufnr, { force = true })
-                    end
-                    return
-                  end
-                end
-              end
-
-              -- No other sessions, close the window
-              window_manager.close_window()
-              if current_bufnr and vim.api.nvim_buf_is_valid(current_bufnr) then
-                vim.api.nvim_buf_delete(current_bufnr, { force = true })
-              end
+              show_replacement_or_close(session_id, owner_tab, current_bufnr)
             end
           else
             -- Legacy terminal exit handling
@@ -177,13 +234,9 @@ local function create_terminal_buffer(cmd_string, env_table, effective_config, s
                 osc_handler.cleanup_buffer_handler(current_bufnr)
               end
 
-              local session_count = session_manager.get_session_count()
-              local session = session_manager.find_session_by_bufnr(current_bufnr)
-              if session then
-                logger.debug("terminal", "Destroying session for exited terminal: " .. session.id)
-                if session_manager.get_session(session.id) then
-                  session_manager.destroy_session(session.id)
-                end
+              if exited_sid and session_manager.get_session(exited_sid) then
+                logger.debug("terminal", "Destroying session for exited terminal: " .. exited_sid)
+                session_manager.destroy_session(exited_sid)
               end
 
               cleanup_state()
@@ -192,34 +245,7 @@ local function create_terminal_buffer(cmd_string, env_table, effective_config, s
                 return
               end
 
-              -- If there are other sessions, switch to one
-              if session_count > 1 then
-                local new_active_id = session_manager.get_active_session_id()
-                if new_active_id then
-                  local new_state = terminals[new_active_id]
-                  if new_state and new_state.bufnr and vim.api.nvim_buf_is_valid(new_state.bufnr) then
-                    window_manager.display_buffer(new_state.bufnr, true)
-
-                    bufnr = new_state.bufnr
-                    jobid = new_state.jobid
-
-                    local winid = window_manager.get_window()
-                    if winid then
-                      local ok, tabbar = pcall(require, "claudecode.terminal.tabbar")
-                      if ok then
-                        tabbar.attach(winid, new_state.bufnr)
-                      end
-                    end
-
-                    if current_bufnr and vim.api.nvim_buf_is_valid(current_bufnr) then
-                      vim.api.nvim_buf_delete(current_bufnr, { force = true })
-                    end
-                    return
-                  end
-                end
-              end
-
-              window_manager.close_window()
+              show_replacement_or_close(exited_sid, owner_tab, current_bufnr, true)
             end
           end
         end)

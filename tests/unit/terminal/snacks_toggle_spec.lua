@@ -55,7 +55,11 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
       win_valid = function()
         return term.win ~= nil and vim.api.nvim_win_is_valid(term.win)
       end,
-      on = function() end,
+      handlers = {},
+      on = function(self, event, fn)
+        self.handlers[event] = self.handlers[event] or {}
+        table.insert(self.handlers[event], fn)
+      end,
       focus = function() end,
       close = function() end,
       -- Snacks originals that patch_instance captures; show recreates a window.
@@ -68,10 +72,13 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
       show = open_show_spy,
       toggle = function() end,
     }
+    _G.__snacks_instances = _G.__snacks_instances or {}
+    table.insert(_G.__snacks_instances, term)
     return term
   end
 
   before_each(function()
+    _G.__snacks_instances = {}
     original_vim = vim
     spy = require("luassert.spy")
     windows = {}
@@ -493,5 +500,106 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
     assert.is_not_nil(here)
     assert.are.equal(2, windows[here].tab)
     assert.is_false(windows[tab1_win].valid) -- a float belongs to one tabpage
+  end)
+
+  -- I4: when a session exits, its replacement is chosen among sessions with
+  -- their own live instance, and with per_tab_sessions on only among the
+  -- exited session's own tabpage.
+  describe("replacement on exit (I4)", function()
+    local session_manager
+    local tab_registry
+
+    before_each(function()
+      package.loaded["claudecode.session"] = nil
+      package.loaded["claudecode.tab_registry"] = nil
+      session_manager = require("claudecode.session")
+      tab_registry = require("claudecode.tab_registry")
+      session_manager.reset()
+      tab_registry.reset()
+      -- Reload the provider so it binds to these fresh session/registry modules.
+      package.loaded["claudecode.terminal.snacks"] = nil
+      snacks_provider = require("claudecode.terminal.snacks")
+      vim.v = { event = { status = 0 } }
+      vim.cmd = setmetatable({ checktime = function() end }, {
+        __call = function(_, c)
+          c = tostring(c)
+          if c:find("split") then
+            last_split_cmd = c
+            current_win = make_window(nil, { relative = "" })
+          end
+        end,
+      })
+      vim.api.nvim_exec_autocmds = function() end
+    end)
+
+    after_each(function()
+      session_manager.reset()
+      tab_registry.reset()
+      package.loaded["claudecode.session"] = nil
+      package.loaded["claudecode.tab_registry"] = nil
+    end)
+
+    local function exit_session(sid)
+      local term = snacks_provider._get_terminal_for_test()
+      -- find the instance by its buffer
+      local buf = snacks_provider.get_session_bufnr(sid)
+      assert.is_not_nil(buf)
+      for _, t in ipairs(_G.__snacks_instances) do
+        if t.buf == buf then
+          term = t
+        end
+      end
+      for _, fn in ipairs(term.handlers.TermClose or {}) do
+        fn()
+      end
+    end
+
+    local function auto_close_split()
+      local cfg = split_config()
+      cfg.auto_close = true
+      return cfg
+    end
+
+    it("per-tab: never pulls another tab's session into the exited session's place", function()
+      tab_registry.set_per_tab_enabled(true)
+      local s1 = session_manager.create_session()
+      tab_registry.bind(1, s1)
+      snacks_provider.open_session(s1, "claude", {}, auto_close_split(), true)
+
+      current_tab = 2
+      current_win = make_window(99, { relative = "" })
+      local s2 = session_manager.create_session()
+      tab_registry.bind(2, s2)
+      snacks_provider.open_session(s2, "claude", {}, auto_close_split(), true)
+      local s2_win = snacks_provider.get_session_window(s2)
+
+      current_tab = 1
+      exit_session(s1)
+
+      -- s2 still lives only in tab 2; nothing of it was shown in tab 1.
+      assert.are.equal(s2_win, snacks_provider.get_session_window(s2))
+      assert.are.equal(2, windows[s2_win].tab)
+      for _, w in pairs(windows) do
+        if w.valid and w.tab == 1 then
+          assert.are_not.equal(snacks_provider.get_session_bufnr(s2), w.buf)
+        end
+      end
+    end)
+
+    it("never maps one session's terminal onto another session", function()
+      local s1 = session_manager.create_session()
+      local s2 = session_manager.create_session() -- never opened: no instance
+      local s3 = session_manager.create_session()
+      snacks_provider.open_session(s1, "claude", {}, auto_close_split(), true)
+      snacks_provider.open_session(s3, "claude", {}, auto_close_split(), true)
+      local s3_buf = snacks_provider.get_session_bufnr(s3)
+      session_manager.set_active_session(s2)
+
+      exit_session(s1)
+
+      assert.is_nil(snacks_provider.get_session_bufnr(s2))
+      assert.are.equal(s3_buf, snacks_provider.get_session_bufnr(s3))
+      assert.are.equal(s3, session_manager.get_active_session_id())
+    end)
   end)
 end)
