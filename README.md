@@ -26,11 +26,12 @@ Features for running and managing several Claude Code terminal sessions:
 
 ### Multi-Session Support
 
-Run multiple Claude Code sessions simultaneously, each with isolated state:
+Run multiple Claude Code sessions simultaneously:
 
 - **Independent sessions** — Each session has its own terminal, WebSocket connection, and context
 - **Easy switching** — Use `:ClaudeCodeSessions` for a picker or `:ClaudeCodeSwitch 2` to switch directly
 - **Session lifecycle** — Create with `:ClaudeCodeNew`, close with `:ClaudeCodeCloseSession`
+- **Shared or per-tab**: by default every tabpage shares the same sessions (`:ClaudeCode` in a second tab shows the same Claude); set `terminal.per_tab_sessions = true` to give each tabpage its own sessions
 
 Perfect for working on multiple features, comparing approaches, or keeping separate contexts for different parts of a project.
 
@@ -476,12 +477,26 @@ Run multiple Claude Code sessions simultaneously:
 - **Switch sessions**: Use `:ClaudeCodeSessions` to pick from a list, or `:ClaudeCodeSwitch 2` to switch directly
 - **Close sessions**: `:ClaudeCodeCloseSession` closes the active session, or `:ClaudeCodeCloseSession 2` to close a specific one
 
-Each session has isolated:
+Each session has its own:
 
 - Terminal buffer and process
 - WebSocket client connection
 - Selection tracking context
-- @ mention queue
+
+@ mentions (`:ClaudeCodeSend`, `:ClaudeCodeAdd`, tree sends) are not routed per session: they share one pending-mention queue and are broadcast to every connected Claude session.
+
+### Sessions and tabpages
+
+`terminal.per_tab_sessions` (default `false`) controls how sessions relate to Neovim tabpages:
+
+- `false` (default, same as upstream): one shared set of sessions across all tabpages. `:ClaudeCode`, `:ClaudeCodeFocus`, sends and diffs in any tabpage show the active session in that tabpage instead of starting another Claude. `:ClaudeCodeNew` still adds sessions, and the session picker, `:ClaudeCodeSwitch` and the tab bar list all of them. Closing a tabpage never stops a session.
+- `true`: each tabpage owns the sessions started in it. `:ClaudeCode` in a new tabpage starts a separate Claude, and the session picker and tab bar list only the current tabpage's sessions. When you close a tabpage, its sessions (and their Claude processes) are moved into the tabpage you land in rather than stopped, so they stay reachable from `:ClaudeCodeSessions` there.
+
+```lua
+terminal = {
+  per_tab_sessions = true, -- default: false (sessions shared by all tabpages)
+}
+```
 
 ### Tab Bar for Sessions
 
@@ -585,7 +600,12 @@ For deep technical details, see [ARCHITECTURE.md](./ARCHITECTURE.md).
       tui_keymaps = false, -- true: route normal-mode j/k/<Up>, mouse wheel, PageUp/PageDown, LeftDrag to Claude's TUI
       scroll_up_enabled = false, -- only consulted when tui_keymaps = true; true: <ScrollWheelUp> exits terminal mode to browse Neovim's scrollback
 
-      -- Process cleanup strategy when Neovim exits or the terminal closes
+      -- false (default): all tabpages share the same Claude sessions. true: each
+      -- tabpage owns its sessions (a closed tabpage's sessions move to the one you land in)
+      per_tab_sessions = false,
+
+      -- Process cleanup strategy when Neovim exits or the terminal closes.
+      -- Only Claude's own terminals are affected, never your other :terminal buffers.
       cleanup_strategy = "pkill_children", -- "pkill_children" | "aggressive" | "jobstop_only" | "none"
 
       -- Tab bar for multi-session management
