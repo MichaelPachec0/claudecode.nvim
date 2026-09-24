@@ -1,8 +1,9 @@
 ---Manual real-process check for terminal cleanup (not collected by busted).
 ---Verifies that claudecode.terminal.cleanup_all() kills: a single tracked job,
 ---several tracked jobs, the children of a tracked shell (pkill -P), and an
----untracked terminal buffer's job (defense-in-depth buffer scan). Prints a
----PASS/FAIL line per case and exits non-zero if any case fails.
+---untracked Claude terminal buffer's job (defense-in-depth buffer scan), and
+---that it never touches the user's own :terminal buffers. Prints a PASS/FAIL
+---line per case and exits non-zero if any case fails.
 ---Run from the repo root (needs a real Neovim, no plugins required):
 ---  nvim --headless --clean -c "set rtp^=." -c "luafile tests/integration/test_cleanup_real.lua"
 
@@ -202,62 +203,91 @@ local function test_child_process_cleanup()
   end
 end
 
+---Start a terminal buffer running `cmd` via termopen.
+---@return number|nil buf, number|nil job_id
+local function start_terminal_buffer(cmd)
+  local buf = vim.api.nvim_create_buf(false, true)
+  local job_id
+  vim.api.nvim_buf_call(buf, function()
+    job_id = vim.fn.termopen(cmd, {
+      on_exit = function() end,
+    })
+  end)
+  if not job_id or job_id <= 0 then
+    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    return nil, nil
+  end
+  return buf, job_id
+end
+
 local function test_defense_in_depth()
-  log("=== Test: Defense-in-depth (untracked terminal buffer) ===")
+  log("=== Test: Defense-in-depth (untracked Claude terminal buffer) ===")
 
   _G._claudecode_tracked_pids = {}
   package.loaded["claudecode.terminal"] = nil
   local terminal = require("claudecode.terminal")
 
-  -- Create a real terminal buffer using termopen
-  local buf = vim.api.nvim_create_buf(false, true)
-
-  -- Start terminal in buffer using termopen (this sets buftype automatically)
-  local job_id
-  vim.api.nvim_buf_call(buf, function()
-    job_id = vim.fn.termopen("sleep 300", {
-      on_exit = function() end,
-    })
-  end)
-
-  if not job_id or job_id <= 0 then
+  local buf, job_id = start_terminal_buffer("sleep 300")
+  if not buf then
     log("FAIL: Could not start terminal")
-    pcall(vim.api.nvim_buf_delete, buf, { force = true })
     return false
   end
+  -- Flag it the way the native/Snacks providers flag Claude's own terminals.
+  vim.b[buf].claudecode_terminal = true
 
   local pid = vim.fn.jobpid(job_id)
   log("Terminal: job_id=" .. job_id .. ", pid=" .. pid)
 
-  -- Verify it's a terminal buffer
-  local buftype = vim.api.nvim_get_option_value("buftype", { buf = buf })
-  log("Buffer type: " .. buftype)
-
-  if buftype ~= "terminal" then
-    log("FAIL: Buffer is not a terminal")
-    vim.fn.jobstop(job_id)
-    pcall(vim.api.nvim_buf_delete, buf, { force = true })
-    return false
-  end
-
   -- DON'T track it - let defense-in-depth find it
   log("NOT tracking PID - testing defense-in-depth recovery")
 
-  -- Cleanup should find it via buffer scan
   terminal.cleanup_all()
   log("Called cleanup_all()")
 
-  -- Verify death
   if wait_for_death(pid, 2000) then
-    log("PASS: Untracked terminal process was killed via defense-in-depth")
+    log("PASS: Untracked Claude terminal process was killed via defense-in-depth")
     pcall(vim.api.nvim_buf_delete, buf, { force = true })
     return true
   else
-    log("FAIL: Untracked process survived - defense-in-depth didn't work")
+    log("FAIL: Untracked Claude process survived - defense-in-depth didn't work")
     vim.fn.jobstop(job_id)
     pcall(vim.api.nvim_buf_delete, buf, { force = true })
     return false
   end
+end
+
+local function test_user_terminal_untouched()
+  log("=== Test: User's own :terminal is never killed ===")
+
+  _G._claudecode_tracked_pids = {}
+  package.loaded["claudecode.terminal"] = nil
+  local terminal = require("claudecode.terminal")
+
+  -- A plain :terminal the user opened: no b:claudecode_terminal flag.
+  local buf, job_id = start_terminal_buffer("sleep 300")
+  if not buf then
+    log("FAIL: Could not start terminal")
+    return false
+  end
+  local pid = vim.fn.jobpid(job_id)
+  log("User terminal: job_id=" .. job_id .. ", pid=" .. pid)
+
+  terminal.cleanup_all()
+  log("Called cleanup_all()")
+
+  -- Give any (wrongly) launched kill script time to land.
+  vim.wait(500, function()
+    return false
+  end)
+  local survived = process_exists(pid)
+  vim.fn.jobstop(job_id)
+  pcall(vim.api.nvim_buf_delete, buf, { force = true })
+  if survived then
+    log("PASS: User terminal process survived cleanup_all()")
+    return true
+  end
+  log("FAIL: cleanup_all() killed a non-Claude terminal")
+  return false
 end
 
 -- Run all tests
@@ -270,6 +300,7 @@ table.insert(results, { "Single process", test_single_process_cleanup() })
 table.insert(results, { "Multiple processes", test_multiple_processes_cleanup() })
 table.insert(results, { "Child processes", test_child_process_cleanup() })
 table.insert(results, { "Defense-in-depth", test_defense_in_depth() })
+table.insert(results, { "User terminal untouched", test_user_terminal_untouched() })
 
 log("========================================")
 log("RESULTS:")

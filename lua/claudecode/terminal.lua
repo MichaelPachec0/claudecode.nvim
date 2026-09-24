@@ -2282,15 +2282,19 @@ function M.cleanup_all()
     end
   end
 
-  -- Defense-in-depth: Recover PIDs from terminal buffers
-  -- This catches any terminal buffers that weren't associated with sessions
+  -- Defense-in-depth: Recover PIDs from Claude terminal buffers
+  -- This catches any Claude terminal buffers that weren't associated with
+  -- sessions. Only buffers the providers flagged with
+  -- b:claudecode_terminal = true are considered: the user's own :terminal
+  -- buffers (also buftype=terminal) are never ours to kill.
   local list_bufs_ok, bufs = pcall(vim.api.nvim_list_bufs)
   if list_bufs_ok and bufs then
     for _, bufnr in ipairs(bufs) do
       local valid_ok, is_valid = pcall(vim.api.nvim_buf_is_valid, bufnr)
       if valid_ok and is_valid then
         local buftype_ok, buftype = pcall(vim.api.nvim_get_option_value, "buftype", { buf = bufnr })
-        if buftype_ok and buftype == "terminal" then
+        local flag_ok, is_claude = pcall(vim.api.nvim_buf_get_var, bufnr, "claudecode_terminal")
+        if buftype_ok and buftype == "terminal" and flag_ok and is_claude == true then
           local job_ok, job_id = pcall(vim.api.nvim_buf_get_var, bufnr, "terminal_job_id")
           if job_ok and job_id and not tracked_pids[job_id] then
             local pid_ok, pid = pcall(vim.fn.jobpid, job_id)

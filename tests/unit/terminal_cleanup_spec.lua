@@ -363,7 +363,7 @@ describe("terminal cleanup_all", function()
       assert.truthy(script:match("pkill %-TERM %-P 20000"), "Expected pkill for recovered PID 20000")
     end)
 
-    it("should recover PIDs from terminal buffers", function()
+    it("should recover PIDs from Claude terminal buffers", function()
       -- Mock nvim_list_bufs to return terminal buffers
       mock_vim.api.nvim_list_bufs = function()
         return { 1, 2, 3 }
@@ -381,8 +381,11 @@ describe("terminal cleanup_all", function()
         return nil
       end
 
-      -- Mock nvim_buf_get_var to return terminal_job_id
+      -- Mock nvim_buf_get_var: both terminals are Claude's (b:claudecode_terminal)
       mock_vim.api.nvim_buf_get_var = function(bufnr, var_name)
+        if var_name == "claudecode_terminal" and (bufnr == 1 or bufnr == 3) then
+          return true
+        end
         if var_name == "terminal_job_id" then
           if bufnr == 1 then
             return 300
@@ -410,6 +413,48 @@ describe("terminal cleanup_all", function()
       local script = jobstart_scripts()
       assert.truthy(script:match("pkill %-TERM %-P 30000"), "Expected pkill for recovered PID 30000")
       assert.truthy(script:match("pkill %-TERM %-P 40000"), "Expected pkill for recovered PID 40000")
+    end)
+
+    it("never signals the user's own :terminal buffers (I1)", function()
+      -- Buffer 1 is Claude's terminal; buffers 2 and 3 are the user's own
+      -- :terminal (no b:claudecode_terminal, or explicitly false). Only
+      -- Claude's may be recovered and killed.
+      mock_vim.api.nvim_list_bufs = function()
+        return { 1, 2, 3 }
+      end
+      mock_vim.api.nvim_get_option_value = function(opt)
+        if opt == "buftype" then
+          return "terminal"
+        end
+        return nil
+      end
+      mock_vim.api.nvim_buf_get_var = function(bufnr, var_name)
+        if var_name == "terminal_job_id" then
+          return bufnr * 100 + 1
+        end
+        if var_name == "claudecode_terminal" then
+          if bufnr == 1 then
+            return true
+          end
+          if bufnr == 3 then
+            return false
+          end
+        end
+        error("Unknown variable: " .. var_name)
+      end
+      package.loaded["claudecode.session"] = {
+        list_sessions = function()
+          return {}
+        end,
+      }
+
+      terminal.cleanup_all()
+
+      assert.are.same({ 101 }, jobstop_calls)
+      local script = jobstart_scripts()
+      assert.truthy(script:match("pkill %-TERM %-P 10100"), "Claude's terminal is still cleaned up")
+      assert.falsy(script:match("20100"), "user terminal (no flag) must not be signaled")
+      assert.falsy(script:match("30100"), "user terminal (flag false) must not be signaled")
     end)
 
     it("should handle mixed tracked and recovered PIDs", function()
@@ -442,6 +487,9 @@ describe("terminal cleanup_all", function()
       mock_vim.api.nvim_buf_get_var = function(bufnr, var_name)
         if var_name == "terminal_job_id" and bufnr == 5 then
           return 200
+        end
+        if var_name == "claudecode_terminal" and bufnr == 5 then
+          return true
         end
         return original_buf_get_var(bufnr, var_name)
       end
