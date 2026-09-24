@@ -63,36 +63,61 @@ terminal = {
 }
 ```
 
-### Triple-ESC in Terminal Mode
+### Optional Terminal Keymaps
 
-Three-state ESC handler for the Claude terminal:
+All of the terminal-mode keymaps below are opt-in and off by default; a fresh
+install behaves like plain `:terminal`, with none of them installed.
 
-- **1× ESC** — forwarded to Claude (cancel current input/operation)
-- **2× ESC** — forwarded as `<ESC><ESC>` (Claude rewind to previous prompt)
-- **3× ESC** — exit Neovim terminal-mode
+| Feature          | Config                                 | Default                 | What it does                                                                                                                                                   |
+| ---------------- | -------------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Smart ESC        | `esc_timeout`, `keymaps.exit_terminal` | off (`esc_timeout = 0`) | 1x and 2x `<Esc>` within the timeout are forwarded to Claude (cancel / rewind); a 3rd `<Esc>` within the timeout exits terminal mode.                          |
+| Split navigation | `split_navigation`                     | off (`false`)           | `<C-h/j/k/l>` move to the neighboring split from both terminal and normal mode in the Claude terminal, and restore whichever mode you were in when you return. |
+| TUI scrolling    | `tui_keymaps`, `scroll_up_enabled`     | off (`false`)           | Normal-mode `j`/`k`/`<Up>`, the mouse wheel, `<PageUp>`/`<PageDown>`, and `<LeftDrag>` are routed to Claude's own TUI scroll instead of Neovim's.              |
 
-> **Note:** double-ESC is reserved for Claude's rewind, so use triple-ESC to exit terminal-mode.
+Enable any of them explicitly:
 
-### TUI Scroll-Back
+```lua
+terminal = {
+  -- Smart ESC: 1x/2x <Esc> forwarded to Claude, 3x exits terminal mode
+  esc_timeout = 200, -- ms; 0 (default) disables smart ESC entirely
+  keymaps = {
+    -- Fallback keymap, only used when esc_timeout <= 0
+    exit_terminal = "<Esc><Esc>",
+  },
 
-Scroll the Claude TUI buffer without leaving terminal-mode:
+  -- <C-h/j/k/l> split navigation from the Claude terminal
+  split_navigation = true, -- default: false
 
-- Mouse wheel and `PageUp` / `PageDown` route to Claude's internal scroll
-- Over-scroll guard keeps you inside terminal-mode at the buffer edges
+  -- TUI scroll/mouse remaps
+  tui_keymaps = true, -- default: false; master switch for the remaps below
+  scroll_up_enabled = false, -- default: false (forward wheel-up to Claude's TUI)
+                              -- true: <ScrollWheelUp> instead exits terminal mode
+                              -- so you can browse Neovim's own scrollback
+}
+```
 
-### Split Navigation with Mode Restore
-
-`<C-w>h/j/k/l` from a Claude terminal jumps to neighbor splits and restores the prior mode (terminal vs normal) when you return. Selection tracking follows window focus so file references stay accurate.
+> **Note:** `<C-h>` sends the same byte as Backspace in many terminal
+> emulators. If you rely on Backspace while Claude's terminal is focused,
+> leave `split_navigation` off (or remap Backspace in your terminal
+> emulator) before enabling it.
 
 ### Robust Process Cleanup
 
-- Orphan Claude processes are killed when Neovim exits
-- Terminal split width is preserved across tab switches and session operations
-- Floating-terminal focus is retained when diffs open
+- Orphan Claude processes are killed when Neovim exits or the terminal
+  closes, controlled by `terminal.cleanup_strategy` (default
+  `"pkill_children"`): signal the process's children, then the shell
+  itself, via a non-blocking background job. This fixes shells (e.g. fish)
+  that do not forward `SIGTERM` to their children. Other values:
+  `"aggressive"` (SIGKILL everything immediately, may leave state behind),
+  `"jobstop_only"` (rely solely on Neovim's `jobstop`), and `"none"` (no
+  automatic cleanup). Signal-based cleanup runs on Unix only; on Windows
+  only `jobstop` runs, regardless of the configured strategy.
+- Terminal split width and height are preserved across tab switches and
+  session operations, including manual resizes you make yourself.
+- Floating-terminal focus is retained when diffs open.
 
-### Server Hooks
+### Server Behavior
 
-- `on_disconnect_cleanup` callback on the TCP server for custom teardown
 - Quieter logs for expected disconnect errors
 - IDE diagnostics tolerate documents without a URI scheme
 
@@ -550,13 +575,18 @@ For deep technical details, see [ARCHITECTURE.md](./ARCHITECTURE.md).
       -- ("auto", the default, enables it only on affected Neovim versions).
       fix_streamed_paste = "auto",
 
-      -- Smart ESC handling: triple-tap ESC to exit terminal mode (1x/2x forwarded to Claude)
-      esc_timeout = 200, -- Timeout in ms (0 or nil to disable smart ESC)
-
-      -- Terminal keymaps
+      -- Optional terminal keymaps: all off by default (see "Optional Terminal
+      -- Keymaps" above for what each one does and how to enable it)
+      esc_timeout = 0, -- ms; > 0 opts in to smart ESC (1x/2x forwarded to Claude, 3x exits)
       keymaps = {
-        exit_terminal = "<Esc><Esc>", -- Key to exit terminal mode when smart ESC disabled (set to false to disable)
+        exit_terminal = false, -- e.g. "<Esc><Esc>"; fallback keymap, only used when esc_timeout <= 0
       },
+      split_navigation = false, -- true: <C-h/j/k/l> split navigation from the Claude terminal
+      tui_keymaps = false, -- true: route normal-mode j/k/<Up>, mouse wheel, PageUp/PageDown, LeftDrag to Claude's TUI
+      scroll_up_enabled = false, -- only consulted when tui_keymaps = true; true: <ScrollWheelUp> exits terminal mode to browse Neovim's scrollback
+
+      -- Process cleanup strategy when Neovim exits or the terminal closes
+      cleanup_strategy = "pkill_children", -- "pkill_children" | "aggressive" | "jobstop_only" | "none"
 
       -- Tab bar for multi-session management
       tabs = {
@@ -650,20 +680,10 @@ vim.api.nvim_create_autocmd("User", {
 > For the common "just make the terminal narrower during diffs" case you don't need
 > the events at all — set `terminal.diff_split_width_percentage` and leave
 > `auto_resize_terminal = true`.
-> **Note:** As of Claude Code's triple-ESC feature, the default terminal ESC behavior has changed:
->
-> - **1× ESC** → forwarded to Claude Code (cancel current request)
-> - **2× ESC** → forwarded to Claude Code (rewind conversation)
-> - **3× ESC** → exits Neovim terminal mode
->
-> To restore the previous double-ESC exit behavior, disable smart ESC:
->
-> ```lua
-> terminal = {
->   esc_timeout = 0,
->   keymaps = { exit_terminal = "<Esc><Esc>" },
-> }
-> ```
+
+Terminal ESC handling is opt-in and off by default; see
+[Optional Terminal Keymaps](#optional-terminal-keymaps) above for the smart
+ESC behavior and how to enable it.
 
 ### Working Directory Control
 

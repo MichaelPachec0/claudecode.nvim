@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+### Added
+
+- Multi-session terminals: `:ClaudeCodeNew` creates a new session, `:ClaudeCodeSessions` shows a picker, `:ClaudeCodeSwitch <number>` switches directly, and `:ClaudeCodeCloseSession [number]` closes a session (the active one if no number is given). Each session has its own terminal buffer/process, WebSocket client, selection tracking, and @ mention queue. An optional per-tab tab bar (`terminal.tabs`, off by default) gives a clickable strip for switching, closing, and creating sessions with the mouse or `Alt+Tab`/`Alt+Shift+Tab`. Ported from upstream ([#164](https://github.com/coder/claudecode.nvim/pull/164)) with fixes for tab-aware `send_to_terminal` routing, Snacks park/unpark preserved per session (so hide/show no longer recreates the window), `:ClaudeCodeClose` stopping the active session's process instead of only closing the window, and process cleanup made asynchronous and non-blocking.
+- `terminal.cleanup_strategy` option (default `"pkill_children"`) controlling how a Claude terminal's process tree is terminated on close or Neovim exit: `"pkill_children"` signals child processes and then the shell via a non-blocking background job (fixes shells such as fish that do not forward `SIGTERM` to children); `"aggressive"` sends SIGKILL immediately; `"jobstop_only"` relies solely on Neovim's `jobstop`; `"none"` disables automatic cleanup. Signal-based cleanup runs on Unix only; only `jobstop` runs on Windows regardless of the configured strategy.
+- Opt-in terminal keymaps, all off by default: smart ESC (`esc_timeout`, `keymaps.exit_terminal`; 1x/2x `<Esc>` forwarded to Claude, a 3rd `<Esc>` exits terminal mode), split navigation (`split_navigation`; `<C-h/j/k/l>` in both terminal and normal mode, restoring the mode you were in when you return), and TUI scroll/mouse remaps (`tui_keymaps`, `scroll_up_enabled`; normal-mode `j`/`k`/`<Up>`, mouse wheel, `<PageUp>`/`<PageDown>`, `<LeftDrag>`).
+- `terminal.split_side` accepts `"top"`/`"bottom"` in addition to `"left"`/`"right"`, opening a horizontal split ([#312](https://github.com/coder/claudecode.nvim/pull/312)).
+- `:ClaudeCodeAgents [args]` command to run `claude agents` in a managed terminal, accepting extra flags such as `--permission-mode auto` ([#250](https://github.com/coder/claudecode.nvim/pull/250)).
+- `claudecode` filetype set on the terminal buffer ([#202](https://github.com/coder/claudecode.nvim/pull/202)).
+- Shift+Enter inserts a newline into the native terminal instead of submitting ([#203](https://github.com/coder/claudecode.nvim/pull/203)).
+
+### Fixed
+
+- Peer connection resets are now treated as ordinary disconnects instead of being logged as server errors ([#317](https://github.com/coder/claudecode.nvim/pull/317)).
+- File paths containing spaces are now handled correctly by `:ClaudeCodeAdd` ([#304](https://github.com/coder/claudecode.nvim/pull/304)).
+- A unified new-tab diff now reuses the tab it opened instead of leaving a stray empty tab behind ([#303](https://github.com/coder/claudecode.nvim/pull/303)).
+- Empty-line visual selections are sent to Claude again instead of being silently dropped ([#310](https://github.com/coder/claudecode.nvim/pull/310)).
+- The Claude terminal buffer is created unlisted, so it no longer shows up in ordinary buffer lists (`:ls`, bufferline, etc.) ([#168](https://github.com/coder/claudecode.nvim/pull/168)).
+- Diff cleanup now refocuses the terminal after a same-tab accept/reject when `keep_terminal_focus` is enabled ([#308](https://github.com/coder/claudecode.nvim/pull/308)).
+- User-initiated diff accept/reject now cleans up its windows and buffers correctly instead of leaving stale state behind ([#241](https://github.com/coder/claudecode.nvim/pull/241)).
+- Native terminal window flags (including disabling spell check) now match the intended terminal presentation ([#299](https://github.com/coder/claudecode.nvim/pull/299)).
+- The managed terminal window is now pinned (`winfixwidth`/`winfixheight`, and `winfixbuf` on Neovim >= 0.10) so other plugins or commands cannot resize it, spell-check it, or swap its buffer out from under it; a manual resize now sticks across tab switches and session operations instead of being reset.
+- A user's own `:terminal` buffer is no longer mistaken for the Claude terminal and reused or overwritten by it.
+
+### Changed
+
+- Bumped `js-yaml` to 4.3.2 ([#320](https://github.com/coder/claudecode.nvim/pull/320)), `@xmldom/xmldom` to 0.8.15 ([#318](https://github.com/coder/claudecode.nvim/pull/318)), and `brace-expansion` to 5.0.7 ([#305](https://github.com/coder/claudecode.nvim/pull/305)) in `scripts/`.
+
 ## [0.4.0] - 2026-06-25
 
 ### Added
@@ -58,9 +85,6 @@
 
 ### Features
 
-- Multi-session terminal support with `:ClaudeCodeNew`, `:ClaudeCodeSessions`, `:ClaudeCodeSwitch`, `:ClaudeCodeCloseSession` commands
-- Tab bar UI with mouse support for session management (`terminal.tabs.*` configuration)
-- Smart ESC handling - double-tap ESC to exit terminal mode (`esc_timeout`, `keymaps.exit_terminal`)
 - External terminal provider to run Claude in a separate terminal ([#102](https://github.com/coder/claudecode.nvim/pull/102))
 - Terminal provider APIs: implement `ensure_visible` for reliability ([#103](https://github.com/coder/claudecode.nvim/pull/103))
 - Working directory control for Claude terminal ([#117](https://github.com/coder/claudecode.nvim/pull/117))
@@ -89,10 +113,6 @@
 
 ### Bug Fixes
 
-- Preserve terminal window size across session operations
-- Keep terminal window open when session exits with other sessions available
-- Fix cursor position when switching terminal sessions
-- Send selection updates on BufEnter event
 - Wrap ERROR/WARN logging in `vim.schedule` to avoid fast-event context errors ([#54](https://github.com/coder/claudecode.nvim/pull/54))
 - Native terminal: do not wipe Claude buffer on window close ([#60](https://github.com/coder/claudecode.nvim/pull/60))
 - Native terminal: respect `auto_close` behavior ([#63](https://github.com/coder/claudecode.nvim/pull/63))

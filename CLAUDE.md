@@ -132,10 +132,18 @@ opts = {
 }
 ```
 
+**Multi-Session Architecture**: Multiple Claude Code sessions can run at once, each tracked as an independent session in `session.lua` (its own terminal buffer/window/job, WebSocket client binding, selection state, and @ mention queue). `tab_registry.lua` binds sessions to the Neovim tabpage that created them and records which one is active per tab, so `:ClaudeCodeSwitch`/`:ClaudeCodeCloseSession` and the tab-scoped commands only ever see the sessions that belong to the current tab. `terminal/window_manager.lua` owns the single physical terminal window per tab and swaps session buffers into it, pinning the window (`winfixwidth`/`winfixheight`, and `winfixbuf` on Neovim >= 0.10) so other plugins cannot resize it or swap its buffer out from under it; the optional `terminal/tabbar.lua` renders a clickable tab strip on top of that window for switching sessions, and `terminal/osc_handler.lua` watches each session's terminal title to give it a display name. `terminal/process_cleanup.lua` is the single choke point every provider calls through to terminate a session's process tree on close or exit, per the configured `terminal.cleanup_strategy`.
+
 ### Key File Locations
 
 - `lua/claudecode/init.lua` - Main entry point and setup
 - `lua/claudecode/config.lua` - Configuration management
+- `lua/claudecode/session.lua` - Session manager: per-session state (terminal buffer/window/job, WebSocket client, selection, mention queue) for multi-session terminals
+- `lua/claudecode/tab_registry.lua` - Binds each Neovim tabpage to the session(s) it owns and tracks the tab's active session
+- `lua/claudecode/terminal/window_manager.lua` - Owns the single managed terminal window per tab and displays whichever session buffer is active
+- `lua/claudecode/terminal/tabbar.lua` - Per-tab clickable tab bar for switching between sessions
+- `lua/claudecode/terminal/osc_handler.lua` - Watches terminal title changes to name sessions from the Claude CLI's own title
+- `lua/claudecode/terminal/process_cleanup.lua` - Terminates Claude terminal jobs and their child processes per `terminal.cleanup_strategy`
 - `plugin/claudecode.lua` - Plugin loader with version checks
 - `tests/` - Comprehensive test suite with unit, component, and integration tests
 
