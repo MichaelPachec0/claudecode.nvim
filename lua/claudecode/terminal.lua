@@ -454,8 +454,9 @@ function M.setup_terminal_keymaps(bufnr, config)
     })
   end
 
-  -- Split navigation: Ctrl+h/j/k/l to move between splits from terminal mode
-  if config.split_navigation ~= false then
+  -- Split navigation: Ctrl+h/j/k/l to move between splits from terminal mode.
+  -- Opt-in: only an explicit true installs it (nil means off, like false).
+  if config.split_navigation == true then
     local saved_mode = {} -- per-buffer saved mode
 
     local directions = { h = "left", j = "below", k = "above", l = "right" }
@@ -1072,6 +1073,8 @@ local function build_config(opts_override)
     split_navigation = effective_config.split_navigation,
     tui_keymaps = effective_config.tui_keymaps,
     scroll_up_enabled = effective_config.scroll_up_enabled,
+    -- Snacks builds its window title (the session tab strip) from tabs.enabled.
+    tabs = effective_config.tabs,
   }
 end
 

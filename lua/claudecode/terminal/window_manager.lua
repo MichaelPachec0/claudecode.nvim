@@ -266,9 +266,30 @@ local function win_in_current_tab(winid)
   return tabpage == vim.api.nvim_get_current_tabpage()
 end
 
+---Window configuration for this call: the setup-time config with any
+---per-call overrides (e.g. :ClaudeCode's opts_override / the effective
+---terminal config) applied on top. Only the window-related keys are taken.
+---@param override table|nil
+---@return table cfg
+local function effective_cfg(override)
+  local cfg = {}
+  for k, v in pairs(state.config or {}) do
+    cfg[k] = v
+  end
+  if type(override) == "table" then
+    for _, key in ipairs({ "split_side", "split_width_percentage", "auto_insert" }) do
+      if override[key] ~= nil then
+        cfg[key] = override[key]
+      end
+    end
+  end
+  return cfg
+end
+
 ---Get or create the terminal window
+---@param override table|nil Per-call config (split_side, split_width_percentage) used when a window is created
 ---@return number|nil winid
-function M.ensure_window()
+function M.ensure_window(override)
   -- Return existing window only if valid AND in current tabpage.
   -- A cached winid from another tab would cause display_buffer to jump tabs.
   if state.winid and win_in_current_tab(state.winid) then
@@ -288,7 +309,7 @@ function M.ensure_window()
   if not state.config then
     state.config = {}
   end
-  state.winid = create_split_window(state.config)
+  state.winid = create_split_window(effective_cfg(override))
   return state.winid
 end
 
@@ -306,8 +327,9 @@ end
 ---Calls jobresize() to notify terminal of dimensions
 ---@param bufnr number Buffer number to display
 ---@param focus boolean Whether to focus the window
+---@param override table|nil Per-call config (split_side, split_width_percentage, auto_insert), e.g. the effective terminal config
 ---@return boolean success
-function M.display_buffer(bufnr, focus)
+function M.display_buffer(bufnr, focus, override)
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     logger.warn("window_manager", "Cannot display invalid buffer: " .. tostring(bufnr))
     return false
@@ -316,7 +338,7 @@ function M.display_buffer(bufnr, focus)
   -- Ensure window exists. Creating the split enters it, so remember where the
   -- cursor was to honor focus = false.
   local prev_win = vim.api.nvim_get_current_win()
-  local winid = M.ensure_window()
+  local winid = M.ensure_window(override)
   if not winid then
     logger.error("window_manager", "Failed to create terminal window")
     return false
@@ -348,7 +370,7 @@ function M.display_buffer(bufnr, focus)
   -- Focus if requested; otherwise step back out of a freshly created split
   if focus then
     vim.api.nvim_set_current_win(winid)
-    if (state.config or {}).auto_insert ~= false then
+    if effective_cfg(override).auto_insert ~= false then
       vim.cmd("startinsert")
     end
   elseif prev_win ~= winid and vim.api.nvim_get_current_win() ~= prev_win and vim.api.nvim_win_is_valid(prev_win) then

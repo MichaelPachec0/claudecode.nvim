@@ -1062,6 +1062,30 @@ describe("claudecode.terminal (wrapper for Snacks.nvim)", function()
         terminal_wrapper.open({}, nil)
         assert.is_true(open_on:get_call(1).refs[3].split_navigation)
       end)
+
+      it("should forward the tabs config in the effective_config (M2: Snacks tab-bar title)", function()
+        local open_spy = spy.new(function() end)
+        terminal_wrapper.setup({
+          provider = {
+            setup = spy.new(function() end),
+            open = open_spy,
+            close = spy.new(function() end),
+            simple_toggle = spy.new(function() end),
+            focus_toggle = spy.new(function() end),
+            get_active_bufnr = spy.new(function()
+              return 123
+            end),
+            is_available = spy.new(function()
+              return true
+            end),
+          },
+          tabs = { enabled = true },
+        })
+        terminal_wrapper.open({}, nil)
+        local cfg = open_spy:get_call(1).refs[3]
+        assert.is_table(cfg.tabs)
+        assert.is_true(cfg.tabs.enabled)
+      end)
     end)
 
     describe("fallback behavior", function()
@@ -1862,6 +1886,14 @@ describe("claudecode.terminal opt-in keymaps defaults (Task 9)", function()
     terminal.setup_terminal_keymaps(12, vim.tbl_extend("force", terminal.defaults, { split_navigation = true }))
     assert.spy(set).was_called_with("t", "<C-h>", match._, match._)
     assert.spy(set).was_called_with("n", "<C-h>", match._, match._)
+    set:revert()
+  end)
+
+  it("treats a missing split_navigation (nil) as off (M3)", function()
+    local set = spy.on(vim.keymap, "set")
+    -- e.g. a custom config table that never mentions the option
+    terminal.setup_terminal_keymaps(12, { esc_timeout = 0, keymaps = {} })
+    assert.spy(set).was_not_called()
     set:revert()
   end)
 end)

@@ -86,7 +86,8 @@ end
 ---@param owner_tab integer|nil Owner tabpage captured at exit time
 ---@param exited_bufnr number|nil The exited terminal's buffer, deleted afterwards
 ---@param keep_buf_on_close boolean|nil Legacy path: leave the buffer when closing the window
-local function show_replacement_or_close(exited_sid, owner_tab, exited_bufnr, keep_buf_on_close)
+---@param effective_config table|nil Terminal config of the exited terminal (window placement)
+local function show_replacement_or_close(exited_sid, owner_tab, exited_bufnr, keep_buf_on_close, effective_config)
   local window_manager = require("claudecode.terminal.window_manager")
   local new_sid, new_state = pick_replacement(exited_sid, owner_tab)
   local other_tab = tab_registry().is_per_tab_enabled()
@@ -96,7 +97,7 @@ local function show_replacement_or_close(exited_sid, owner_tab, exited_bufnr, ke
   if new_sid and new_state and other_tab then
     session_manager.set_active_session(new_sid)
   elseif new_sid and new_state then
-    window_manager.display_buffer(new_state.bufnr, true)
+    window_manager.display_buffer(new_state.bufnr, true, effective_config)
     session_manager.set_active_session(new_sid)
 
     -- Update legacy state
@@ -221,7 +222,7 @@ local function create_terminal_buffer(cmd_string, env_table, effective_config, s
                 return
               end
 
-              show_replacement_or_close(session_id, owner_tab, current_bufnr)
+              show_replacement_or_close(session_id, owner_tab, current_bufnr, false, effective_config)
             end
           else
             -- Legacy terminal exit handling
@@ -245,7 +246,7 @@ local function create_terminal_buffer(cmd_string, env_table, effective_config, s
                 return
               end
 
-              show_replacement_or_close(exited_sid, owner_tab, current_bufnr, true)
+              show_replacement_or_close(exited_sid, owner_tab, current_bufnr, true, effective_config)
             end
           end
         end)
@@ -282,7 +283,7 @@ function M.open(cmd_string, env_table, effective_config, focus)
 
   if is_valid() then
     -- Terminal buffer exists, display it via window manager
-    window_manager.display_buffer(bufnr, focus)
+    window_manager.display_buffer(bufnr, focus, effective_config)
     return
   end
 
@@ -300,7 +301,7 @@ function M.open(cmd_string, env_table, effective_config, focus)
   jobid = new_jobid
 
   -- Display buffer via window manager
-  window_manager.display_buffer(bufnr, focus)
+  window_manager.display_buffer(bufnr, focus, effective_config)
 
   -- Set up terminal keymaps
   local terminal_module = require("claudecode.terminal")
@@ -369,7 +370,7 @@ function M.simple_toggle(cmd_string, env_table, effective_config)
   elseif is_valid() then
     -- Terminal buffer exists but not visible, show it
     logger.debug("terminal", "Simple toggle: showing hidden terminal")
-    window_manager.display_buffer(bufnr, true)
+    window_manager.display_buffer(bufnr, true, effective_config)
   else
     -- No terminal exists, create new one
     logger.debug("terminal", "Simple toggle: creating new terminal")
@@ -388,7 +389,7 @@ function M.focus_toggle(cmd_string, env_table, effective_config)
     -- Terminal not visible
     if is_valid() then
       logger.debug("terminal", "Focus toggle: showing hidden terminal")
-      window_manager.display_buffer(bufnr, true)
+      window_manager.display_buffer(bufnr, true, effective_config)
     else
       logger.debug("terminal", "Focus toggle: creating new terminal")
       M.open(cmd_string, env_table, effective_config)
@@ -464,7 +465,7 @@ function M.open_session(session_id, cmd_string, env_table, effective_config, foc
   -- Check if this session already has a valid terminal buffer
   if is_session_valid(session_id) then
     -- Display existing buffer via window manager
-    window_manager.display_buffer(terminals[session_id].bufnr, focus)
+    window_manager.display_buffer(terminals[session_id].bufnr, focus, effective_config)
 
     -- Update legacy state
     bufnr = terminals[session_id].bufnr
@@ -491,7 +492,7 @@ function M.open_session(session_id, cmd_string, env_table, effective_config, foc
   end
 
   -- Display buffer via window manager
-  window_manager.display_buffer(new_bufnr, focus)
+  window_manager.display_buffer(new_bufnr, focus, effective_config)
 
   -- Set up terminal keymaps
   local terminal_module = require("claudecode.terminal")
@@ -618,7 +619,7 @@ function M.close_session_keep_window(old_session_id, new_session_id, effective_c
 
   -- If new terminal exists, display it via window manager
   if new_state and new_state.bufnr and vim.api.nvim_buf_is_valid(new_state.bufnr) then
-    window_manager.display_buffer(new_state.bufnr, true)
+    window_manager.display_buffer(new_state.bufnr, true, effective_config)
 
     -- Update legacy state
     bufnr = new_state.bufnr
@@ -681,7 +682,7 @@ function M.focus_session(session_id, effective_config)
   end
 
   -- Display buffer via window manager
-  window_manager.display_buffer(state.bufnr, true)
+  window_manager.display_buffer(state.bufnr, true, effective_config)
 
   -- Update legacy state
   bufnr = state.bufnr

@@ -441,6 +441,26 @@ describe("claudecode.terminal.native toggle behavior", function()
     end)
   end)
 
+  describe("per-call window overrides (M1)", function()
+    it("creates the window from the effective config, not only the setup-time one", function()
+      local cmds = {}
+      local orig_cmd = mock_vim.cmd
+      mock_vim.cmd = function(c)
+        table.insert(cmds, c)
+        return orig_cmd(c)
+      end
+      require("claudecode.terminal.window_manager").setup({ split_side = "right", split_width_percentage = 0.3 })
+      native_provider.open("claude", {}, { split_side = "left", split_width_percentage = 0.5 }, true)
+      local created_left = false
+      for _, c in ipairs(cmds) do
+        if c == "topleft vertical new" then
+          created_left = true
+        end
+      end
+      assert.is_true(created_left)
+    end)
+  end)
+
   describe("PID tracking (C2)", function()
     -- A job that has exited must be untracked right away: its PID can be
     -- reused by an unrelated process, which cleanup_all would then signal.

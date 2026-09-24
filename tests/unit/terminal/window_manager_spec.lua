@@ -796,6 +796,37 @@ describe("claudecode.terminal.window_manager", function()
       assert.spy(mock_vim.api.nvim_win_set_width).was_called_with(win, 50)
     end)
 
+    it("honors a per-call split_side/width override when creating the window (M1)", function()
+      window_manager.setup({ split_side = "right", split_width_percentage = 0.25 })
+      local win = window_manager.ensure_window({ split_side = "left", split_width_percentage = 0.5 })
+
+      assert.spy(mock_vim.cmd).was_called_with("topleft vertical new")
+      assert.spy(mock_vim.api.nvim_win_set_width).was_called_with(win, 100)
+    end)
+
+    it("honors a per-call auto_insert = false override when focusing (M1)", function()
+      mock_vim.api.nvim_buf_is_valid = spy.new(function()
+        return true
+      end)
+      mock_vim.api.nvim_buf_get_name = spy.new(function()
+        return ""
+      end)
+      mock_vim.api.nvim_win_set_buf = spy.new(function() end)
+      mock_vim.api.nvim_set_current_win = spy.new(function() end)
+      mock_vim.api.nvim_win_get_buf = spy.new(function()
+        return 7
+      end)
+      mock_vim.bo = setmetatable({}, {
+        __index = function()
+          return { channel = 0, buftype = "terminal" }
+        end,
+      })
+      window_manager.setup({ split_side = "right", split_width_percentage = 0.25, auto_insert = true })
+      window_manager.display_buffer(7, true, { auto_insert = false })
+
+      assert.spy(mock_vim.cmd).was_not_called_with("startinsert")
+    end)
+
     it("creates a vertical split using topleft for split_side=left", function()
       window_manager.setup({ split_side = "left", split_width_percentage = 0.25 })
       window_manager.ensure_window()
