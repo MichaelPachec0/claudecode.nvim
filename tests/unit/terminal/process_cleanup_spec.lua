@@ -152,6 +152,23 @@ describe("claudecode.terminal.process_cleanup", function()
     end)
   end)
 
+  describe("is_valid_pid", function()
+    it("rejects pid 1 (init) and anything below it", function()
+      assert.is_false(cleanup.is_valid_pid(1))
+      assert.is_false(cleanup.is_valid_pid(0))
+      assert.is_false(cleanup.is_valid_pid(-5))
+      assert.is_false(cleanup.is_valid_pid(2.5))
+      assert.is_false(cleanup.is_valid_pid("42"))
+      assert.is_true(cleanup.is_valid_pid(2))
+      assert.is_true(cleanup.is_valid_pid(4242))
+    end)
+
+    it("never puts pid 1 into a kill script", function()
+      cleanup.stop_many({ { job_id = 1, pid = 1 } }, "pkill_children")
+      assert.spy(vim.fn.jobstart).was_not_called()
+    end)
+  end)
+
   describe("stop_many", function()
     it("runs exactly one detached script for a batch of pkill_children entries", function()
       cleanup.stop_many({

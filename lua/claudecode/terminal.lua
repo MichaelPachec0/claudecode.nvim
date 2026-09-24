@@ -20,27 +20,32 @@ local tracked_pids = _G._claudecode_tracked_pids
 _G._claudecode_buffer_to_session = _G._claudecode_buffer_to_session or {}
 local buffer_to_session = _G._claudecode_buffer_to_session
 
----Cleanup orphaned PIDs from a previous module load (Fix 3: Plugin Reload
+---PID of `job_id` if that job is still running, else nil. Neovim raises E900
+---from jobpid() once a job has exited, so this doubles as a liveness check.
+---@param job_id number
+---@return number|nil pid
+local function live_job_pid(job_id)
+  local ok, pid = pcall(vim.fn.jobpid, job_id)
+  if ok and type(pid) == "number" and pid > 0 then
+    return pid
+  end
+  return nil
+end
+
+---Drop tracked PIDs whose jobs no longer exist (Fix 3: Plugin Reload
 ---Protection). Called from M.setup() (not at module load: this module must
----have no side effects at require time) to kill any processes orphaned by a
----plugin reload. Runs through process_cleanup so it never blocks the UI.
----@param strategy string|nil The configured cleanup_strategy (D3 default: "pkill_children")
-local function cleanup_orphaned_pids(strategy)
-  local process_cleanup = require("claudecode.terminal.process_cleanup")
-  local entries = {}
+---have no side effects at require time). Stale entries are only forgotten,
+---never signaled: once a job has exited its PID may already belong to an
+---unrelated process, so signaling it could kill that process (group).
+local function prune_stale_tracked_pids()
   for job_id, pid in pairs(tracked_pids) do
-    -- Check if job still exists
-    local exists = pcall(vim.fn.jobpid, job_id)
-    if not exists then
-      -- Job doesn't exist but PID tracked - orphaned
-      table.insert(entries, { job_id = job_id, pid = pid })
+    local live = live_job_pid(job_id)
+    if not live or live ~= pid then
       tracked_pids[job_id] = nil
     end
   end
-  if #entries > 0 then
-    process_cleanup.stop_many(entries, strategy)
-  end
 end
+M._prune_stale_tracked_pids = prune_stale_tracked_pids
 
 ---Track a terminal job's PID for cleanup on exit
 ---@param job_id number The Neovim job ID
@@ -1586,10 +1591,10 @@ function M.setup(user_term_config, p_terminal_cmd, p_env)
 
   setup_buffer_cleanup_autocmd()
 
-  -- Kill any processes orphaned by a previous module load (Fix 3: Plugin
-  -- Reload Protection). Deferred to setup() so this module has no side
-  -- effects at require time.
-  cleanup_orphaned_pids(defaults.cleanup_strategy)
+  -- Forget tracked PIDs whose jobs are gone (Fix 3: Plugin Reload
+  -- Protection). Deferred to setup() so this module has no side effects at
+  -- require time. Nothing is signaled here; see prune_stale_tracked_pids.
+  prune_stale_tracked_pids()
 
   -- Setup window manager with config
   local window_manager = require("claudecode.terminal.window_manager")
@@ -2300,12 +2305,18 @@ function M.cleanup_all()
   end
 
   -- Collect job_id/pid entries first (don't stop jobs yet - that's the race condition!)
+  -- Only jobs that are still running are included: a job that already exited
+  -- is dropped, never signaled, because its PID may have been reused by an
+  -- unrelated process.
   local entries = {}
   local pid_count = 0
   for job_id, pid in pairs(tracked_pids) do
-    table.insert(entries, { job_id = job_id, pid = pid })
-    if pid and pid > 0 then
+    local live = live_job_pid(job_id)
+    if live and live == pid then
+      table.insert(entries, { job_id = job_id, pid = pid })
       pid_count = pid_count + 1
+    else
+      logger.debug("terminal", "cleanup_all: dropping stale PID " .. tostring(pid) .. " (job " .. job_id .. " exited)")
     end
   end
 

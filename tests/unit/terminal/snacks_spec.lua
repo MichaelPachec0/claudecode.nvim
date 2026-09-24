@@ -23,7 +23,11 @@ describe("claudecode.terminal.snacks command handling", function()
       win_valid = function()
         return false
       end,
-      on = function() end,
+      on = function(_, event, fn)
+        captured.handlers = captured.handlers or {}
+        captured.handlers[event] = captured.handlers[event] or {}
+        table.insert(captured.handlers[event], fn)
+      end,
       toggle = function() end,
       focus = function() end,
       close = function() end,
@@ -141,6 +145,10 @@ describe("claudecode.terminal.snacks command handling", function()
       setup_terminal_keymaps = function() end,
       setup_scroll_keymaps = function() end,
       track_terminal_pid = function() end,
+      untrack_terminal_pid = function(job_id)
+        captured.untracked = captured.untracked or {}
+        table.insert(captured.untracked, job_id)
+      end,
     }
     package.loaded["claudecode.terminal.osc_handler"] = {
       setup_buffer_handler = function() end,
@@ -173,6 +181,36 @@ describe("claudecode.terminal.snacks command handling", function()
 
   local function base_config()
     return { cwd = "/work", split_side = "right", split_width_percentage = 0.30, auto_close = false }
+  end
+
+  -- C2: an exited job's PID must be untracked immediately, whatever auto_close
+  -- is set to; a stale PID can be reused by an unrelated process.
+  for _, auto_close in ipairs({ false, true }) do
+    for _, event in ipairs({ "TermClose", "BufWipeout" }) do
+      it("untracks the job PID on " .. event .. " (auto_close = " .. tostring(auto_close) .. ")", function()
+        vim.api.nvim_buf_get_var = function(_, name)
+          if name == "terminal_job_id" then
+            return 55
+          end
+          error("no var")
+        end
+        vim.v = { event = { status = 0 } }
+        vim.cmd = setmetatable({}, {
+          __call = function() end,
+          __index = function()
+            return function() end
+          end,
+        })
+        local cfg = base_config()
+        cfg.auto_close = auto_close
+        snacks_provider.open_session("s1", "claude", {}, cfg, true)
+        assert.is_truthy(captured.handlers and captured.handlers[event], "no " .. event .. " handler registered")
+        for _, fn in ipairs(captured.handlers[event]) do
+          fn()
+        end
+        assert.are.same({ 55 }, { (captured.untracked or {})[1] })
+      end)
+    end
   end
 
   it("passes a bracketed model alias to Snacks as an argv list, not a shell string", function()

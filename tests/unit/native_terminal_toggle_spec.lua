@@ -34,6 +34,7 @@ describe("claudecode.terminal.native toggle behavior", function()
       next_jobid = 10000,
       job_exit_callbacks = {}, -- jobid -> on_exit callback
       termopen_calls = {},
+      untracked = {}, -- job ids passed to terminal.untrack_terminal_pid
     }
 
     -- Mock vim API with stateful behavior matching the window-less native
@@ -283,6 +284,9 @@ describe("claudecode.terminal.native toggle behavior", function()
       register_buffer_session = function() end,
       update_session_terminal_info = function() end,
       track_terminal_pid = function() end,
+      untrack_terminal_pid = function(job_id)
+        table.insert(mock_state.untracked, job_id)
+      end,
     }
 
     -- Load the native provider
@@ -434,6 +438,34 @@ describe("claudecode.terminal.native toggle behavior", function()
       native_provider.close()
       assert.is_nil(native_provider.get_active_bufnr())
       assert.is_nil(next(state.job_exit_callbacks))
+    end)
+  end)
+
+  describe("PID tracking (C2)", function()
+    -- A job that has exited must be untracked right away: its PID can be
+    -- reused by an unrelated process, which cleanup_all would then signal.
+    it("untracks the job's PID when a session terminal exits", function()
+      -- open_session wires the OSC title watcher; stub it (needs a real uv loop).
+      package.loaded["claudecode.terminal.osc_handler"] = {
+        setup_buffer_handler = function() end,
+        cleanup_buffer_handler = function() end,
+      }
+      package.loaded["claudecode.terminal.native"] = nil
+      native_provider = require("claudecode.terminal.native")
+      native_provider.setup({})
+      native_provider.open_session("s1", "claude", {}, { auto_close = true }, true)
+      local state = _G.get_mock_state()
+      local jobid = state.termopen_calls[1].jobid
+      state.job_exit_callbacks[jobid](jobid, 0, "exit")
+      assert.are.same({ jobid }, state.untracked)
+    end)
+
+    it("untracks the job's PID when the legacy terminal exits", function()
+      native_provider.open("claude", {}, { auto_close = true })
+      local state = _G.get_mock_state()
+      local jobid = state.termopen_calls[1].jobid
+      state.job_exit_callbacks[jobid](jobid, 0, "exit")
+      assert.are.same({ jobid }, state.untracked)
     end)
   end)
 

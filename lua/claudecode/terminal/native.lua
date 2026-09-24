@@ -100,12 +100,12 @@ local function create_terminal_buffer(cmd_string, env_table, effective_config, s
       env = env_table,
       cwd = effective_config.cwd,
       on_exit = function(job_id, _, _)
+        -- The process is gone: stop tracking its PID right away. A PID that
+        -- stays tracked after exit can be reused by an unrelated process,
+        -- which cleanup_all would then signal. Jobs still alive at
+        -- VimLeavePre have not exited, so they are still tracked there.
+        terminal_module.untrack_terminal_pid(job_id)
         vim.schedule(function()
-          -- NOTE: We intentionally do NOT call untrack_terminal_pid() here.
-          -- This is Fix 4's "Secondary Issue" - untracking here causes a race condition
-          -- where PIDs are removed from tracking before cleanup_all() runs on Neovim exit.
-          -- Let cleanup_all() handle the cleanup of tracked_pids instead.
-
           -- For multi-session
           if session_id then
             local state = terminals[session_id]

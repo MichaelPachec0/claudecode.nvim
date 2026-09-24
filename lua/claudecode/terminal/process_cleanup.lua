@@ -15,7 +15,7 @@
 ---    orphaning exactly the processes pkill_children exists to catch. It
 ---    still never blocks Neovim's loop; only the eventual jobstop is delayed
 ---    until the async kill job reports it is done.
----  - M.stop_many (batch: cleanup_all / VimLeavePre / cleanup_orphaned_pids)
+---  - M.stop_many (batch: cleanup_all / VimLeavePre)
 ---    runs one DETACHED script for the whole batch and then jobstops every
 ---    job immediately, because on exit Neovim does not wait for callbacks:
 ---    the shell job needs to die together with the process, so there is no
@@ -25,14 +25,17 @@ local M = {}
 
 ---@alias ClaudeCodeCleanupStrategy "jobstop_only"|"pkill_children"|"aggressive"|"none"
 
----True when `pid` is safe to interpolate into a shell command: a positive
----integer. Anything else (nil, a float, a string, zero, negative) is rejected
----so a malformed PID can never end up inside a string-concatenated command.
+---True when `pid` is safe to interpolate into a shell command and to signal:
+---an integer greater than 1. Anything else (nil, a float, a string, zero,
+---negative) is rejected so a malformed PID can never end up inside a
+---string-concatenated command, and PID 1 (init) is rejected because
+---"kill -KILL -1" would signal every process the user owns.
 ---@param pid any
 ---@return boolean
 local function is_valid_pid(pid)
-  return type(pid) == "number" and pid > 0 and pid == math.floor(pid)
+  return type(pid) == "number" and pid > 1 and pid == math.floor(pid)
 end
+M.is_valid_pid = is_valid_pid
 
 ---@return boolean
 local function is_windows()
@@ -41,10 +44,10 @@ local function is_windows()
 end
 
 ---Builds the shell script that terminates a batch of process trees for the
----given strategy. Only pre-validated positive-integer PIDs are ever
+---given strategy. Only pre-validated PIDs (integers > 1) are ever
 ---interpolated. Used for both the single-job path (a one-PID list) and the
 ---batched exit path (many PIDs in one script).
----@param pids number[] Validated, positive-integer PIDs
+---@param pids number[] Validated PIDs (integers > 1)
 ---@param strategy "pkill_children"|"aggressive"
 ---@return string|nil script nil when there is nothing to run
 local function build_kill_script(pids, strategy)

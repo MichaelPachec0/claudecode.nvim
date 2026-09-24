@@ -240,6 +240,54 @@ describe("terminal cleanup_all", function()
     assert.are.same({}, system_calls)
   end)
 
+  describe("stale PIDs (C2)", function()
+    -- Simulates Neovim after a job exits: jobpid() raises E900 for it.
+    local function mark_exited(exited)
+      mock_vim.fn.jobpid = function(job_id)
+        if exited[job_id] then
+          error("Vim:E900: Invalid channel id")
+        end
+        return job_id * 100
+      end
+    end
+
+    it("does not signal a tracked job that has already exited", function()
+      terminal.track_terminal_pid(42)
+      terminal.track_terminal_pid(43)
+      mark_exited({ [42] = true })
+
+      terminal.cleanup_all()
+
+      local script = jobstart_scripts()
+      assert.falsy(script:match("4200"), "must not signal the exited job's (possibly reused) PID")
+      assert.truthy(script:match("pkill %-TERM %-P 4300"), "still signals the live job")
+      assert.are.same({ 43 }, jobstop_calls)
+    end)
+
+    it("launches nothing when every tracked job has exited", function()
+      terminal.track_terminal_pid(42)
+      mark_exited({ [42] = true })
+      terminal.cleanup_all()
+      assert.are.same({}, jobstart_calls)
+      assert.are.same({}, jobstop_calls)
+    end)
+
+    it("setup-time orphan cleanup drops dead entries without signaling anything", function()
+      -- Entries left by a previous module load (or Neovim session) whose jobs
+      -- no longer exist: their PIDs are never safe to signal.
+      _G._claudecode_tracked_pids[77] = 7700
+      _G._claudecode_tracked_pids[88] = 8800
+      mark_exited({ [77] = true })
+
+      terminal._prune_stale_tracked_pids()
+
+      assert.are.same({}, jobstart_calls)
+      assert.are.same({}, jobstop_calls)
+      assert.is_nil(_G._claudecode_tracked_pids[77])
+      assert.are.equal(8800, _G._claudecode_tracked_pids[88]) -- live job kept
+    end)
+  end)
+
   it("should handle jobpid failure gracefully", function()
     -- Make jobpid fail
     mock_vim.fn.jobpid = function()

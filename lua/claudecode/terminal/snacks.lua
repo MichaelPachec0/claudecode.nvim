@@ -418,6 +418,21 @@ end
 local function setup_terminal_events(term_instance, config, session_id)
   local logger = require("claudecode.logger")
 
+  -- Stop tracking the job's PID as soon as the process exits, regardless of
+  -- auto_close: a PID that stays tracked after exit can be reused by an
+  -- unrelated process, which cleanup_all would then signal.
+  local function untrack_job()
+    local buf = term_instance.buf
+    if not buf then
+      return
+    end
+    local ok, job_id = pcall(vim.api.nvim_buf_get_var, buf, "terminal_job_id")
+    if ok and job_id then
+      require("claudecode.terminal").untrack_terminal_pid(job_id)
+    end
+  end
+  term_instance:on("TermClose", untrack_job, { buf = true })
+
   -- Handle command completion/exit - only if auto_close is enabled
   if config.auto_close then
     term_instance:on("TermClose", function()
@@ -538,6 +553,7 @@ local function setup_terminal_events(term_instance, config, session_id)
   -- Handle buffer deletion
   term_instance:on("BufWipeout", function()
     logger.debug("terminal", "Terminal buffer wiped" .. (session_id and (" for session " .. session_id) or ""))
+    untrack_job()
 
     -- Cleanup OSC handler
     if term_instance.buf then
