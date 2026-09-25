@@ -180,6 +180,16 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
         nvim_get_current_tabpage = function()
           return current_tab
         end,
+        nvim_tabpage_list_wins = function(t)
+          local ids = {}
+          for id, w in pairs(windows) do
+            if w.valid and w.tab == t then
+              table.insert(ids, id)
+            end
+          end
+          table.sort(ids)
+          return ids
+        end,
         nvim_buf_is_valid = function(b)
           return b ~= nil and b >= 1
         end,
@@ -500,6 +510,113 @@ describe("claudecode.terminal.snacks hide/show/toggle", function()
     assert.is_not_nil(here)
     assert.are.equal(2, windows[here].tab)
     assert.is_false(windows[tab1_win].valid) -- a float belongs to one tabpage
+  end)
+
+  -- Shared sessions + split: a session shown in two tabpages must toggle per
+  -- tabpage. Each toggle hides the window the current tab shows, or shows one
+  -- there (reusing a window the tab already has); a tab never ends up with two
+  -- windows of the same session, and no window is left stuck.
+  describe("shared-mode split toggled across tabpages", function()
+    -- Mirrors terminal.lua simple_toggle for a window-owning provider: hide the
+    -- session when it is on screen in the current tab, otherwise show it.
+    local function toggle(sid, cfg)
+      local w = snacks_provider.get_session_window(sid)
+      if w and windows[w].tab == current_tab then
+        snacks_provider.hide_session(sid)
+      else
+        snacks_provider.open_session(sid, "claude", {}, cfg, true)
+      end
+    end
+
+    local function wins_in_tab(tab, buf)
+      local ids = {}
+      for id, w in pairs(windows) do
+        if w.valid and w.tab == tab and w.buf == buf and not w.config.hide then
+          table.insert(ids, id)
+        end
+      end
+      return ids
+    end
+
+    local function goto_tab(tab)
+      current_tab = tab
+      for id, w in pairs(windows) do
+        if w.valid and w.tab == tab and w.buf ~= nil then
+          current_win = id
+          return
+        end
+      end
+      current_win = make_window(90 + tab, { relative = "" })
+    end
+
+    it("tab 1 show, tab 2 show, tab 1 toggle hides with no second window", function()
+      local cfg = split_config()
+      goto_tab(1)
+      toggle("s1", cfg)
+      local buf = snacks_provider.get_session_bufnr("s1")
+      assert.are.equal(1, #wins_in_tab(1, buf))
+
+      goto_tab(2)
+      toggle("s1", cfg)
+      assert.are.equal(1, #wins_in_tab(2, buf))
+      assert.are.equal(1, #wins_in_tab(1, buf)) -- tab 1 keeps its own view
+
+      goto_tab(1)
+      local visible = snacks_provider.get_session_window("s1")
+      assert.is_not_nil(visible)
+      assert.are.equal(1, windows[visible].tab) -- the tab's own window is found
+      toggle("s1", cfg)
+      assert.are.equal(0, #wins_in_tab(1, buf)) -- hidden, not duplicated
+      assert.are.equal(1, #wins_in_tab(2, buf)) -- tab 2 untouched
+    end)
+
+    it("never stacks two windows in a tab over many alternating cycles", function()
+      local cfg = split_config()
+      goto_tab(1)
+      toggle("s1", cfg)
+      local buf = snacks_provider.get_session_bufnr("s1")
+      local expect = { [1] = 1, [2] = 0 }
+      for _ = 1, 10 do
+        for _, tab in ipairs({ 2, 1 }) do
+          goto_tab(tab)
+          toggle("s1", cfg)
+          expect[tab] = 1 - expect[tab]
+          for t = 1, 2 do
+            local n = #wins_in_tab(t, buf)
+            assert.is_true(n <= 1, "tab " .. t .. " shows the session " .. n .. " times")
+            assert.are.equal(expect[t], n, "tab " .. t .. " visibility")
+          end
+        end
+      end
+    end)
+
+    it("reuses the tab's existing window instead of opening another split on show", function()
+      local cfg = split_config()
+      goto_tab(1)
+      toggle("s1", cfg)
+      local buf = snacks_provider.get_session_bufnr("s1")
+      local tab1_win = wins_in_tab(1, buf)[1]
+      goto_tab(2)
+      toggle("s1", cfg)
+      goto_tab(1)
+      current_win = make_window(95, { relative = "" }) -- cursor in another window
+      snacks_provider.open_session("s1", "claude", {}, cfg, true)
+      assert.are.same({ tab1_win }, wins_in_tab(1, buf))
+      assert.are.equal(tab1_win, current_win) -- focused, not duplicated
+    end)
+
+    it("parks a session shown in this tab when another session takes its place", function()
+      local cfg = split_config()
+      goto_tab(1)
+      toggle("s1", cfg)
+      local buf1 = snacks_provider.get_session_bufnr("s1")
+      goto_tab(2)
+      toggle("s1", cfg)
+      goto_tab(1)
+      snacks_provider.open_session("s2", "claude", {}, cfg, true)
+      assert.are.equal(0, #wins_in_tab(1, buf1)) -- s1's tab-1 view was parked
+      assert.are.equal(1, #wins_in_tab(2, buf1)) -- tab 2 keeps its own view
+    end)
   end)
 
   -- I4: when a session exits, its replacement is chosen among sessions with

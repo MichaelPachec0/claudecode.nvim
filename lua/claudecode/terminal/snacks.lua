@@ -165,6 +165,58 @@ local function win_in_current_tab(win)
   return ok_win and ok_cur and win_tab == cur_tab
 end
 
+---The window that shows `term`'s buffer in the current tabpage, if any
+---(config-hidden floats excluded). With shared sessions the same instance can
+---be on screen in several tabpages, one window each, while `term.win` only
+---remembers the last one opened; this finds the one the user is looking at.
+---@param term table Snacks terminal instance
+---@return number|nil winid
+local function current_tab_win(term)
+  if not (term and term.buf) then
+    return nil
+  end
+  if win_in_current_tab(term.win) and cc_is_visible(term) then
+    return term.win
+  end
+  if not vim.api.nvim_tabpage_list_wins then
+    return nil
+  end
+  local ok_tab, tab = pcall(vim.api.nvim_get_current_tabpage)
+  if not ok_tab then
+    return nil
+  end
+  local ok, wins = pcall(vim.api.nvim_tabpage_list_wins, tab)
+  if not ok then
+    return nil
+  end
+  for _, win in ipairs(wins) do
+    if
+      vim.api.nvim_win_is_valid(win)
+      and vim.api.nvim_win_get_buf(win) == term.buf
+      and not win_is_config_hidden(win)
+    then
+      return win
+    end
+  end
+  return nil
+end
+
+---Point `term.win` at the window this tabpage already shows, so hide/show
+---act on it instead of stacking a second split here. A float living in
+---another tabpage is left tracked (it is moved or recreated by cc_show).
+---@param term table Snacks terminal instance
+---@return number|nil winid The current tabpage's window, if any
+local function adopt_current_tab_win(term)
+  local win = current_tab_win(term)
+  if win and win ~= term.win then
+    local tracked = term.win
+    if not (tracked and vim.api.nvim_win_is_valid(tracked) and win_is_floating(tracked)) then
+      term.win = win
+    end
+  end
+  return win
+end
+
 ---Hide the terminal window without disturbing the cursor anchor.
 ---@param term table Snacks terminal instance
 local function cc_hide(term)
@@ -216,6 +268,8 @@ local function cc_show(term, focus, config)
     return false
   end
   local logger = require("claudecode.logger")
+  -- A window this tabpage already shows is reused (focused), never stacked on.
+  adopt_current_tab_win(term)
   local win = term.win
 
   -- Shared sessions (terminal.per_tab_sessions = false): the instance can be on
@@ -342,6 +396,7 @@ local function patch_instance(term, config)
     return self
   end
   function term:toggle()
+    adopt_current_tab_win(self)
     if cc_is_visible(self) then
       cc_hide(self)
     else
@@ -373,7 +428,7 @@ local function park_others_in_current_tab(keep)
   local function park(term)
     if term and term ~= keep and not seen[term] then
       seen[term] = true
-      if term:buf_valid() and cc_is_visible(term) and win_in_current_tab(term.win) then
+      if term:buf_valid() and adopt_current_tab_win(term) and win_in_current_tab(term.win) then
         cc_hide(term)
       end
     end
@@ -961,6 +1016,7 @@ function M.simple_toggle(cmd_string, env_table, config)
   local logger = require("claudecode.logger")
 
   if terminal and terminal:buf_valid() then
+    adopt_current_tab_win(terminal)
     if cc_is_visible(terminal) then
       logger.debug("terminal", "Simple toggle: hiding visible terminal")
       cc_hide(terminal)
@@ -987,6 +1043,7 @@ function M.focus_toggle(cmd_string, env_table, config)
   local logger = require("claudecode.logger")
 
   if terminal and terminal:buf_valid() then
+    adopt_current_tab_win(terminal)
     if not cc_is_visible(terminal) then
       -- Terminal exists but is hidden -> show and focus it.
       logger.debug("terminal", "Focus toggle: showing hidden terminal")
@@ -1267,7 +1324,16 @@ end
 ---@return number|nil winid
 function M.get_session_window(session_id)
   local term_instance = terminals[session_id]
-  if term_instance and term_instance:buf_valid() and cc_is_visible(term_instance) then
+  if not (term_instance and term_instance:buf_valid()) then
+    return nil
+  end
+  -- Prefer the window shown in the current tabpage: with shared sessions the
+  -- instance can be on screen in several tabpages and term.win only tracks one.
+  local here = current_tab_win(term_instance)
+  if here then
+    return here
+  end
+  if cc_is_visible(term_instance) then
     return term_instance.win
   end
   return nil
@@ -1279,6 +1345,8 @@ end
 function M.hide_session(session_id)
   local term_instance = terminals[session_id]
   if term_instance and term_instance:buf_valid() then
+    -- Hide the view in the current tabpage; views in other tabpages stay.
+    adopt_current_tab_win(term_instance)
     cc_hide(term_instance)
   end
 end
