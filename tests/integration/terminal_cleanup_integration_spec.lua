@@ -57,17 +57,13 @@ describe("terminal cleanup integration", function()
   end
 
   -- Helper to wait for process to die (with timeout)
+  -- vim.wait spins the event loop. A vim.loop.sleep() busy-loop would not: the
+  -- cached vim.loop.now() never advances (infinite loop), and killed children
+  -- are never reaped, so they linger as zombies that `kill -0` still reports.
   local function wait_for_process_death(pid, timeout_ms)
-    timeout_ms = timeout_ms or 2000
-    local start = vim.loop.now()
-    while vim.loop.now() - start < timeout_ms do
-      if not process_exists(pid) then
-        return true
-      end
-      -- Small delay
-      vim.loop.sleep(50)
-    end
-    return false
+    return vim.wait(timeout_ms or 2000, function()
+      return not process_exists(pid)
+    end, 50)
   end
 
   before_each(function()
@@ -157,7 +153,7 @@ describe("terminal cleanup integration", function()
       assert.is_truthy(shell_pid, "Failed to get shell PID")
 
       -- Give the shell time to spawn its children
-      vim.loop.sleep(200)
+      vim.wait(200)
 
       -- Find child PIDs using pgrep
       local handle = io.popen("pgrep -P " .. shell_pid .. " 2>/dev/null")
@@ -249,6 +245,10 @@ describe("terminal cleanup integration", function()
           on_exit = function() end,
         })
       end)
+
+      -- Providers tag Claude buffers this way; cleanup_all only scans tagged
+      -- buffers so a user's own :terminal is never signaled.
+      vim.b[buf].claudecode_terminal = true
 
       -- Get the job_id from the buffer
       local ok, job_id = pcall(vim.api.nvim_buf_get_var, buf, "terminal_job_id")
