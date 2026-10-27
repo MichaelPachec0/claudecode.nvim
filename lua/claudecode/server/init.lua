@@ -316,6 +316,32 @@ function M._handle_notification(client, notification)
   end
 end
 
+local checktime_generation = 0
+
+---Claude's own Edit/Write tools change files on disk without going through
+---MCP, and the CLI follows such edits with IDE tool calls (getDiagnostics,
+---openFile, ...). While focus stays in the Claude terminal no event triggers
+---'autoread', so open buffers would keep showing stale text. Once a burst of
+---tool calls settles, run one :checktime. Only with 'autoread' on (Neovim's
+---default): with it off, :checktime stops to ask about every changed file.
+local function schedule_checktime()
+  if not (vim.defer_fn and vim.o and vim.o.autoread) then
+    return
+  end
+  checktime_generation = checktime_generation + 1
+  local generation = checktime_generation
+  vim.defer_fn(function()
+    if generation ~= checktime_generation then
+      return
+    end
+    -- :checktime raises E11 while the command-line window is open.
+    if vim.fn.getcmdwintype() ~= "" then
+      return
+    end
+    pcall(vim.cmd, "checktime")
+  end, 100)
+end
+
 ---Register message handlers for the server
 function M.register_handlers()
   M.state.handlers = {
@@ -358,6 +384,7 @@ function M.register_handlers()
         vim.inspect(params and params.arguments)
       )
       local result_or_error_table = tools.handle_invoke(client, params)
+      schedule_checktime()
 
       -- Check if this is a deferred response (blocking tool)
       if result_or_error_table and result_or_error_table._deferred then
