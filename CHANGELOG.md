@@ -11,9 +11,17 @@
 - `:ClaudeCodeAgents [args]` command to run `claude agents` in a managed terminal, accepting extra flags such as `--permission-mode auto` ([#250](https://github.com/coder/claudecode.nvim/pull/250)).
 - `claudecode` filetype set on the terminal buffer ([#202](https://github.com/coder/claudecode.nvim/pull/202)).
 - Shift+Enter inserts a newline into the native terminal instead of submitting ([#203](https://github.com/coder/claudecode.nvim/pull/203)).
+- `ide_name` option to tell several Neovim instances apart in the Claude CLI's `/ide` picker: `context = true` labels this one `Neovim [tmux:session:window]` (of Neovim's own pane) or `Neovim [~/project]`, and `override` sets an exact label. The default label stays `Neovim` (based on [#247](https://github.com/coder/claudecode.nvim/pull/247)).
+- `User` autocmds `ClaudeCodeConnected`/`ClaudeCodeDisconnected` (a Claude CLI completed or lost its authenticated connection) and `ClaudeCodeTerminalOpened`/`ClaudeCodeTerminalHidden` (claudecode showed or hid the current tab's terminal), each carrying the session id (based on [#227](https://github.com/coder/claudecode.nvim/pull/227)).
 
 ### Fixed
 
+- `:ClaudeCode --resume` (and other arguments, including `:ClaudeCodeAgents`) no longer get silently dropped when a Claude session is already running: arguments that differ from the running session's start a separate session, which leaves the existing one running; repeating the same arguments toggles as before (based on [#199](https://github.com/coder/claudecode.nvim/pull/199)).
+- `:ClaudeCodeDiffAccept`/`:ClaudeCodeDiffDeny` work from any window of the tab, such as the Claude terminal or the original-file side, instead of only from the proposed-changes buffer; with two different Claude diffs in the tab they warn instead of guessing (based on [#211](https://github.com/coder/claudecode.nvim/pull/211)).
+- Open file buffers are reloaded (one debounced `:checktime`, only with `'autoread'` on) after Claude's tool calls, so files Claude edited on disk no longer stay stale while focus is in the terminal (based on [#219](https://github.com/coder/claudecode.nvim/pull/219)).
+- A local process that opens a socket to the IDE server without passing authentication (port scanners, dev-server discovery daemons) is no longer bound to the newest Claude session ahead of the real CLI: the connect callback now runs only after the authenticated handshake.
+- A failed handshake no longer raises `handle ... is already closing` when the peer has already hung up ([#322](https://github.com/coder/claudecode.nvim/pull/322)).
+- Sessions created within the same event-loop tick keep their creation order, so session numbers used by `:ClaudeCodeSwitch`, `:ClaudeCodeCloseSession`, the tab bar and the picker no longer swap, and an incoming CLI is bound to the right session.
 - Peer connection resets are now treated as ordinary disconnects instead of being logged as server errors ([#317](https://github.com/coder/claudecode.nvim/pull/317)).
 - File paths containing spaces are now handled correctly by `:ClaudeCodeAdd` ([#304](https://github.com/coder/claudecode.nvim/pull/304)).
 - A unified new-tab diff now reuses the tab it opened instead of leaving a stray empty tab behind ([#303](https://github.com/coder/claudecode.nvim/pull/303)).
@@ -27,6 +35,7 @@
 
 ### Changed
 
+- Bumped `handlebars` to 4.7.10 in `scripts/` ([#323](https://github.com/coder/claudecode.nvim/pull/323)).
 - Bumped `js-yaml` to 4.3.2 ([#320](https://github.com/coder/claudecode.nvim/pull/320)), `@xmldom/xmldom` to 0.8.15 ([#318](https://github.com/coder/claudecode.nvim/pull/318)), and `brace-expansion` to 5.0.7 ([#305](https://github.com/coder/claudecode.nvim/pull/305)) in `scripts/`.
 
 ## [0.4.0] - 2026-06-25
