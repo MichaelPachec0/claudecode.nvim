@@ -217,7 +217,9 @@ describe("multi-session terminal", function()
         -- (failed or killed) run can never satisfy or fail these checks.
         local sleeper = string.format("sleep %d", 70000 + (vim.loop.hrtime() % 20000))
         local ok, err = pcall(function()
-          assert.is_true(terminal.send_to_terminal(sleeper .. " &", { submit = true }))
+          -- `set +m` turns off the interactive shell's job control so the child
+          -- stays in the shell's process group, as Claude's own children do.
+          assert.is_true(terminal.send_to_terminal("set +m; " .. sleeper .. " &", { submit = true }))
           assert.is_true(
             vim.wait(5000, function()
               return #pgrep_exact(sleeper) > 0
