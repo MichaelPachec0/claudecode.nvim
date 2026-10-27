@@ -208,8 +208,9 @@ describe("TCP server disconnect handling", function()
 
     tcp._handle_new_connection(server)
 
-    assert.spy(callbacks.on_connect).was_called(1)
-    local client = callbacks.on_connect.calls[1].vals[1]
+    -- on_connect waits for the authenticated handshake; a bare accept is not a connection.
+    assert.spy(callbacks.on_connect).was_not_called()
+    local _, client = next(server.clients)
     assert.is_table(client)
     assert.is_table(client.tcp_handle)
     assert.is_function(client.tcp_handle._read_cb)
@@ -246,7 +247,7 @@ describe("TCP server disconnect handling", function()
 
       tcp._handle_new_connection(server)
 
-      local client = callbacks.on_connect.calls[1].vals[1]
+      local _, client = next(server.clients)
       client.tcp_handle._read_cb(err, nil)
 
       assert.spy(callbacks.on_disconnect).was_called(1)
@@ -274,7 +275,7 @@ describe("TCP server disconnect handling", function()
 
       tcp._handle_new_connection(server)
 
-      local client = callbacks.on_connect.calls[1].vals[1]
+      local _, client = next(server.clients)
       client.tcp_handle._read_cb(err, nil)
 
       assert.spy(callbacks.on_error).was_called(1)
@@ -299,7 +300,7 @@ describe("TCP server disconnect handling", function()
 
     tcp._handle_new_connection(server)
 
-    local client = callbacks.on_connect.calls[1].vals[1]
+    local _, client = next(server.clients)
     client.tcp_handle._read_cb("boom", nil)
 
     assert.spy(callbacks.on_disconnect).was_called(1)
@@ -329,7 +330,7 @@ describe("TCP server disconnect handling", function()
 
     tcp._handle_new_connection(server)
 
-    local client = callbacks.on_connect.calls[1].vals[1]
+    local _, client = next(server.clients)
     client.tcp_handle._read_cb(nil, "some data")
 
     assert.spy(callbacks.on_disconnect).was_called(1)
@@ -356,7 +357,7 @@ describe("TCP server disconnect handling", function()
 
     tcp._handle_new_connection(server)
 
-    local client = callbacks.on_connect.calls[1].vals[1]
+    local _, client = next(server.clients)
     client.tcp_handle._read_cb(nil, "data")
 
     assert.spy(callbacks.on_disconnect).was_called(1)

@@ -201,6 +201,13 @@ function M._handle_new_connection(server)
   -- Create WebSocket client wrapper
   local client = client_manager.create_client(client_tcp)
   server.clients[client.id] = client
+  -- on_connect fires only once the client has passed the authenticated
+  -- WebSocket handshake. Firing it at TCP accept let any local process that
+  -- merely opened a socket (port scanners, dev-server discovery daemons) be
+  -- bound to the newest Claude session ahead of the real CLI.
+  client.on_open = function(cl)
+    server.on_connect(cl)
+  end
 
   -- Set up data handler
   client_tcp:read_start(function(err, data)
@@ -240,9 +247,6 @@ function M._handle_new_connection(server)
       M._disconnect_client(server, cl, 1006, "Client error: " .. error_msg)
     end, server.auth_token)
   end)
-
-  -- Notify about new connection
-  server.on_connect(client)
 end
 
 ---Disconnect a client and remove it from the server.
