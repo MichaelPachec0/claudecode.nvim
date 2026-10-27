@@ -15,6 +15,7 @@ local logger = require("claudecode.logger")
 ---@field selection table|nil Session-specific selection state
 ---@field mention_queue table Queue for @ mentions
 ---@field created_at number Timestamp when session was created
+---@field seq number Creation sequence number; breaks created_at ties
 ---@field name string|nil Optional display name for the session
 
 ---@type table<string, ClaudeCodeSession>
@@ -43,6 +44,19 @@ local function now_ms()
   return os.time() * 1000
 end
 
+---True when session a was created before session b. created_at comes from the
+---cached loop time, so sessions created in one event-loop tick tie; seq (a
+---strictly increasing creation counter) keeps their order deterministic.
+---@param a ClaudeCodeSession
+---@param b ClaudeCodeSession
+---@return boolean
+local function created_before(a, b)
+  if a.created_at ~= b.created_at then
+    return a.created_at < b.created_at
+  end
+  return a.seq < b.seq
+end
+
 ---Generate a unique session ID
 ---@return string session_id
 local function generate_session_id()
@@ -67,6 +81,7 @@ function M.create_session(opts)
     selection = nil,
     mention_queue = {},
     created_at = now_ms(),
+    seq = session_counter,
     name = opts.name or string.format("Session %d", session_counter),
   }
 
@@ -198,9 +213,7 @@ function M.list_sessions()
   end
 
   -- Sort by creation time
-  table.sort(sessions, function(a, b)
-    return a.created_at < b.created_at
-  end)
+  table.sort(sessions, created_before)
 
   return sessions
 end
@@ -236,7 +249,7 @@ function M.find_unbound_session()
   local newest
   for _, session in pairs(M.sessions) do
     if not session.client_id then
-      if not newest or session.created_at > newest.created_at then
+      if not newest or created_before(newest, session) then
         newest = session
       end
     end

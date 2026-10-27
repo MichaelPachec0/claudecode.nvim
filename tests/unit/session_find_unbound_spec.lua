@@ -59,4 +59,22 @@ describe("session_manager.find_unbound_session", function()
     assert.is_not_nil(found)
     expect(found.id).to_be(s2)
   end)
+
+  it("returns the last-created unbound session when timestamps tie", function()
+    -- Sessions created in one event-loop tick share the cached uv.now().
+    local handle = vim.uv or vim.loop
+    local saved_now = handle.now
+    handle.now = function()
+      return 1000
+    end
+    local last
+    for i = 1, 12 do
+      last = session_manager.create_session({ name = "S" .. i })
+    end
+    handle.now = saved_now
+
+    local found = session_manager.find_unbound_session()
+    assert.is_not_nil(found)
+    expect(found.id).to_be(last)
+  end)
 end)

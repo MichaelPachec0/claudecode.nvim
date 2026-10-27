@@ -177,6 +177,28 @@ describe("Session Manager", function()
         assert.is_true(sessions[i].created_at <= sessions[i + 1].created_at)
       end
     end)
+
+    it("keeps creation order when sessions share a loop timestamp", function()
+      -- uv.now() is cached per event-loop tick, so sessions created in one
+      -- tick (a mapping or script) get identical created_at values.
+      local handle = vim.uv or vim.loop
+      local saved_now = handle.now
+      handle.now = function()
+        return 1000
+      end
+
+      local created = {}
+      for i = 1, 12 do
+        created[i] = session_manager.create_session()
+      end
+      handle.now = saved_now
+
+      local listed = {}
+      for i, s in ipairs(session_manager.list_sessions()) do
+        listed[i] = s.id
+      end
+      assert.are.same(created, listed)
+    end)
   end)
 
   describe("get_session_count", function()
