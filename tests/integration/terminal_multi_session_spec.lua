@@ -213,24 +213,30 @@ describe("multi-session terminal", function()
 
       it("cleanup_all stops background children of a session shell", function()
         open_session()
-        -- Distinct duration per side so a leftover from one case cannot satisfy another.
-        local sleeper = horizontal and "sleep 7772" or "sleep 7771"
-        assert.is_true(terminal.send_to_terminal(sleeper .. " &", { submit = true }))
-        assert.is_true(
-          vim.wait(2000, function()
-            return #pgrep_exact(sleeper) > 0
-          end, 50),
-          "background child never started"
-        )
+        -- A duration unique to this run, so a process leaked by an earlier
+        -- (failed or killed) run can never satisfy or fail these checks.
+        local sleeper = string.format("sleep %d", 70000 + (vim.loop.hrtime() % 20000))
+        local ok, err = pcall(function()
+          assert.is_true(terminal.send_to_terminal(sleeper .. " &", { submit = true }))
+          assert.is_true(
+            vim.wait(5000, function()
+              return #pgrep_exact(sleeper) > 0
+            end, 50),
+            "background child never started"
+          )
 
-        terminal.cleanup_all()
+          terminal.cleanup_all()
 
-        assert.is_true(
-          vim.wait(2000, function()
-            return #pgrep_exact(sleeper) == 0
-          end, 50),
-          "background child survived cleanup_all"
-        )
+          assert.is_true(
+            vim.wait(2000, function()
+              return #pgrep_exact(sleeper) == 0
+            end, 50),
+            "background child survived cleanup_all"
+          )
+        end)
+        -- Never leak the sleeper, even when an assertion failed.
+        vim.fn.system({ "pkill", "-f", "^" .. sleeper .. "$" })
+        assert(ok, err)
       end)
     end)
   end
