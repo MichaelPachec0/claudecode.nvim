@@ -1833,12 +1833,45 @@ local function restore_terminal_focus_after_user_resolve()
   end
 end
 
+---Finds the diff buffer a user command should act on: the current buffer when
+---it is a Claude diff, otherwise the one Claude diff shown in the current tab
+---(so :ClaudeCodeDiffAccept/Deny also work from the terminal split or the
+---original-file side). Two different diffs in the tab is ambiguous: nil + reason.
+---@return integer|nil bufnr
+---@return string|nil err Warning to show when no buffer is returned
+local function find_user_diff_buffer()
+  local current = vim.api.nvim_get_current_buf()
+  if vim.b[current].claudecode_diff_tab_name or vim.b[current].claudecode_inline_diff then
+    return current
+  end
+  local found, found_tab_name
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local buf = vim.api.nvim_win_get_buf(win)
+    local tab_name = vim.b[buf].claudecode_diff_tab_name
+    if tab_name then
+      if found_tab_name and tab_name ~= found_tab_name then
+        return nil, "Several Claude diffs are open in this tab; run the command from the diff you mean"
+      end
+      found, found_tab_name = buf, tab_name
+    end
+  end
+  if not found then
+    return nil, "No active diff found in current tab"
+  end
+  return found
+end
+
 ---Accept the current diff (user command version)
----This function reads the diff context from buffer variables.
+---This function reads the diff context from buffer variables of the current
+---buffer, or of the only Claude diff in the current tab (see find_user_diff_buffer).
 ---Unlike Claude-initiated resolve (which waits for the close_tab MCP tool call),
 ---user commands clean up the diff UI immediately since close_tab is internal-only.
 function M.accept_current_diff()
-  local current_buffer = vim.api.nvim_get_current_buf()
+  local current_buffer, find_err = find_user_diff_buffer()
+  if not current_buffer then
+    vim.notify(find_err, vim.log.levels.WARN)
+    return
+  end
 
   -- Check for inline diff buffer first
   if vim.b[current_buffer].claudecode_inline_diff then
@@ -1864,11 +1897,16 @@ function M.accept_current_diff()
 end
 
 ---Deny/reject the current diff (user command version)
----This function reads the diff context from buffer variables.
+---This function reads the diff context from buffer variables of the current
+---buffer, or of the only Claude diff in the current tab (see find_user_diff_buffer).
 ---Unlike Claude-initiated resolve (which waits for the close_tab MCP tool call),
 ---user commands clean up the diff UI immediately since close_tab is internal-only.
 function M.deny_current_diff()
-  local current_buffer = vim.api.nvim_get_current_buf()
+  local current_buffer, find_err = find_user_diff_buffer()
+  if not current_buffer then
+    vim.notify(find_err, vim.log.levels.WARN)
+    return
+  end
 
   -- Check for inline diff buffer first
   if vim.b[current_buffer].claudecode_inline_diff then

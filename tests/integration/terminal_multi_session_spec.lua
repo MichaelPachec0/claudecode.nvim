@@ -355,5 +355,65 @@ describe("multi-session terminal", function()
 
       assert.are.equal(proposed_win(), vim.api.nvim_get_current_win())
     end)
+
+    it("accepts from the Claude terminal window", function()
+      local term_win = open_session()
+      vim.cmd("wincmd p")
+      set_keep_terminal_focus(false)
+      local get_result = open_blocking_diff("accept-from-terminal")
+
+      vim.api.nvim_set_current_win(term_win)
+      vim.cmd("ClaudeCodeDiffAccept")
+
+      assert.is_nil(proposed_win(), "diff window survived accept")
+      assert.is_true(vim.wait(1000, function()
+        return get_result() ~= nil
+      end, 20))
+      assert.are.equal("FILE_SAVED", get_result().content[1].text)
+    end)
+
+    it("denies from the original-file side of the diff", function()
+      open_session()
+      vim.cmd("wincmd p")
+      set_keep_terminal_focus(false)
+      local get_result = open_blocking_diff("deny-from-original")
+      local original_win
+      for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+        if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win)) == target_file then
+          original_win = win
+        end
+      end
+      assert.is_not_nil(original_win, "original-file window not found")
+
+      vim.api.nvim_set_current_win(original_win)
+      vim.cmd("ClaudeCodeDiffDeny")
+
+      assert.is_true(vim.wait(1000, function()
+        return get_result() ~= nil
+      end, 20))
+      assert.are.equal("DIFF_REJECTED", get_result().content[1].text)
+    end)
+
+    it("refuses to guess when the tab shows two different diffs", function()
+      local editor_win = vim.api.nvim_get_current_win()
+      for _, name in ipairs({ "diff-a", "diff-b" }) do
+        vim.cmd("vsplit")
+        local buf = vim.api.nvim_create_buf(false, true)
+        vim.api.nvim_win_set_buf(0, buf)
+        vim.b[buf].claudecode_diff_tab_name = name
+      end
+      vim.api.nvim_set_current_win(editor_win)
+      local warnings = {}
+      local saved_notify = vim.notify
+      vim.notify = function(msg)
+        table.insert(warnings, msg)
+      end
+
+      vim.cmd("ClaudeCodeDiffAccept")
+      vim.notify = saved_notify
+
+      assert.are.equal(1, #warnings)
+      assert.is_truthy(warnings[1]:find("Several Claude diffs", 1, true), warnings[1])
+    end)
   end)
 end)
