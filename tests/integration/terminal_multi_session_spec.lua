@@ -201,6 +201,38 @@ describe("multi-session terminal", function()
         os.remove(marker)
       end)
 
+      it("starts a separate session for new arguments instead of dropping them", function()
+        local first_buf = vim.api.nvim_win_get_buf(open_session())
+        local first_job = vim.b[first_buf].terminal_job_id
+
+        vim.cmd("ClaudeCode -i") -- `sh -i`; stands in for `claude --resume`
+
+        assert.is_true(vim.wait(1000, function()
+          return terminal.get_session_count() == 2
+        end, 20))
+        local new_buf = vim.api.nvim_win_get_buf(only_claude_win())
+        assert.are_not.equal(first_buf, new_buf)
+        assert.are.equal(-1, vim.fn.jobwait({ first_job }, 0)[1], "first session must keep running")
+        local pid = vim.fn.jobpid(vim.b[new_buf].terminal_job_id)
+        local argv = vim.split(vim.trim(vim.fn.system({ "ps", "-o", "args=", "-p", tostring(pid) })), "%s+")
+        assert.are.equal(2, #argv, vim.inspect(argv))
+        assert.is_truthy(argv[1]:match("sh$"), vim.inspect(argv))
+        assert.are.equal("-i", argv[2], "the new session must receive the arguments")
+      end)
+
+      it("toggles a session when the same arguments are repeated", function()
+        open_session()
+        vim.cmd("ClaudeCode -i")
+        assert.is_true(vim.wait(1000, function()
+          return terminal.get_session_count() == 2
+        end, 20))
+
+        vim.cmd("ClaudeCode -i")
+
+        assert.are.equal(2, terminal.get_session_count(), "repeating the same arguments must not stack sessions")
+        assert.are.equal(0, #claude_wins(), "repeating the same arguments hides the session")
+      end)
+
       it("refuses :bnext in the Claude window", function()
         local win = open_session()
         local buf = vim.api.nvim_win_get_buf(win)

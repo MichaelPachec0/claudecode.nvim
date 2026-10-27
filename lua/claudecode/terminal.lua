@@ -139,6 +139,31 @@ local function current_tab_has_live_terminal()
   return sess ~= nil and sess.terminal_bufnr ~= nil and vim.api.nvim_buf_is_valid(sess.terminal_bufnr)
 end
 
+---Explicit Claude arguments (`:ClaudeCode --resume`, `:ClaudeCodeAgents`) only
+---reach the CLI when a terminal is spawned, so reusing the tab's live session
+---would silently drop them. When they differ from the arguments that session
+---was launched with, start a separate session with them instead; the existing
+---one keeps running and stays reachable via :ClaudeCodeSwitch. Matching
+---arguments fall through to the normal show/hide toggle.
+---@param provider table
+---@param opts_override table|nil
+---@param cmd_args string|nil
+---@return boolean started True when a new session was started
+local function open_session_for_new_args(provider, opts_override, cmd_args)
+  if not provider.open_session or not cmd_args or cmd_args == "" then
+    return false
+  end
+  if not current_tab_has_live_terminal() then
+    return false
+  end
+  local _, sess = current_tab_session()
+  if sess and sess.cmd_args == cmd_args then
+    return false
+  end
+  M.open_new_session(opts_override, cmd_args)
+  return true
+end
+
 ---Session ids the current tabpage may show, active one first: the tab's own
 ---sessions with per_tab_sessions on, otherwise every session.
 ---@param tab integer
@@ -207,8 +232,13 @@ end
 ---@param session_id string
 ---@param bufnr number
 ---@param provider table The terminal provider module
+---@param cmd_args string|nil Claude CLI arguments the session was launched with
 ---@return string session_id
-local function finalize_session_terminal(session_id, bufnr, provider)
+local function finalize_session_terminal(session_id, bufnr, provider, cmd_args)
+  local session = session_manager.get_session(session_id)
+  if session then
+    session.cmd_args = cmd_args
+  end
   if bufnr then
     session_manager.update_terminal_info(session_id, { bufnr = bufnr })
     if provider.register_terminal_for_session then
@@ -1258,7 +1288,7 @@ local function ensure_terminal_visible_no_focus(opts_override, cmd_args)
     local session_id, newly_created = ensure_current_tab_session()
     provider.open_session(session_id, cmd_string, claude_env_table, effective_config, false)
     if newly_created then
-      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider)
+      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider, cmd_args)
     end
     return true
   end
@@ -1628,13 +1658,16 @@ function M.open(opts_override, cmd_args)
   local effective_config = build_config(opts_override)
   local cmd_string, claude_env_table = get_claude_command_and_env(cmd_args)
   local provider = get_provider()
+  if open_session_for_new_args(provider, opts_override, cmd_args) then
+    return
+  end
 
   if provider.open_session then
     -- Session-aware path: route through the session-aware provider API.
     local session_id, newly_created = ensure_current_tab_session()
     provider.open_session(session_id, cmd_string, claude_env_table, effective_config, true)
     if newly_created then
-      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider)
+      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider, cmd_args)
     end
   else
     -- Legacy / custom provider without per-session support: keep historic behavior.
@@ -1673,6 +1706,9 @@ function M.simple_toggle(opts_override, cmd_args)
   local effective_config = build_config(opts_override)
   local cmd_string, claude_env_table = get_claude_command_and_env(cmd_args)
   local provider = get_provider()
+  if open_session_for_new_args(provider, opts_override, cmd_args) then
+    return
+  end
 
   if provider.open_session then
     -- Session-aware path
@@ -1700,7 +1736,7 @@ function M.simple_toggle(opts_override, cmd_args)
     local session_id, newly_created = ensure_current_tab_session()
     provider.open_session(session_id, cmd_string, claude_env_table, effective_config, true)
     if newly_created then
-      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider)
+      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider, cmd_args)
     end
 
     local active_bufnr = provider.get_active_bufnr()
@@ -1751,6 +1787,9 @@ function M.focus_toggle(opts_override, cmd_args)
   local effective_config = build_config(opts_override)
   local cmd_string, claude_env_table = get_claude_command_and_env(cmd_args)
   local provider = get_provider()
+  if open_session_for_new_args(provider, opts_override, cmd_args) then
+    return
+  end
 
   if provider.open_session then
     local session_id, newly_created
@@ -1793,7 +1832,7 @@ function M.focus_toggle(opts_override, cmd_args)
     end
     provider.open_session(session_id, cmd_string, claude_env_table, effective_config, true)
     if newly_created then
-      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider)
+      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider, cmd_args)
     end
 
     local active_bufnr = provider.get_active_bufnr()
@@ -2022,6 +2061,7 @@ end
 ---@return string session_id The ID of the new session
 function M.open_new_session(opts_override, cmd_args)
   local session_id = session_manager.create_session()
+  session_manager.get_session(session_id).cmd_args = cmd_args
   local effective_config = build_config(opts_override)
   local cmd_string, claude_env_table = get_claude_command_and_env(cmd_args)
 
