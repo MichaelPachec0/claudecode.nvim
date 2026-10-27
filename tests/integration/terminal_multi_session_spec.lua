@@ -214,7 +214,13 @@ describe("multi-session terminal", function()
         assert.are_not.equal(first_buf, new_buf)
         assert.are.equal(-1, vim.fn.jobwait({ first_job }, 0)[1], "first session must keep running")
         local pid = vim.fn.jobpid(vim.b[new_buf].terminal_job_id)
-        local argv = vim.split(vim.trim(vim.fn.system({ "ps", "-o", "args=", "-p", tostring(pid) })), "%s+")
+        local argv = {}
+        -- Poll: right after spawn the process may still be inside execve, when
+        -- ps shows only "[sh]" because the new command line is not set yet.
+        vim.wait(2000, function()
+          argv = vim.split(vim.trim(vim.fn.system({ "ps", "-o", "args=", "-p", tostring(pid) })), "%s+")
+          return #argv == 2
+        end, 20)
         assert.are.equal(2, #argv, vim.inspect(argv))
         assert.is_truthy(argv[1]:match("sh$"), vim.inspect(argv))
         assert.are.equal("-i", argv[2], "the new session must receive the arguments")
