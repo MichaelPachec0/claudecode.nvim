@@ -137,6 +137,13 @@
 ---@field disable_broadcast_debouncing? boolean
 ---@field enable_broadcast_debouncing_in_tests? boolean
 ---@field terminal ClaudeCodeTerminalConfig?
+---@field ide_name ClaudeCodeIdeNameConfig?
+
+-- Label the Claude CLI shows for this instance in its /ide picker
+---@class ClaudeCodeIdeNameConfig
+---@field override string? Use this exact label
+---@field context boolean? Append "[tmux:session:window]" or "[~/cwd]" to "Neovim" (default false)
+---@field tmux_include_pane boolean? With context in tmux, also append the pane index
 
 ---@class (partial) PartialClaudeCodeConfig: ClaudeCodeConfig
 

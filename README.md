@@ -570,6 +570,15 @@ For deep technical details, see [ARCHITECTURE.md](./ARCHITECTURE.md).
     track_selection = true,
     visual_demotion_delay_ms = 50,
 
+    -- Label in the Claude CLI's /ide picker (default "Neovim"). With several
+    -- Neovim instances open, context = true tells them apart:
+    -- "Neovim [tmux:session:window]" inside tmux, "Neovim [~/project]" outside.
+    ide_name = {
+      override = nil, -- exact label, e.g. "Work laptop"
+      context = false,
+      tmux_include_pane = false, -- with context in tmux, also add the pane index
+    },
+
     -- Terminal Configuration
     terminal = {
       split_side = "right", -- "left", "right", "top", or "bottom" (top/bottom = horizontal split)

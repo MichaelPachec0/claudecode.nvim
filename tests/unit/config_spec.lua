@@ -201,6 +201,19 @@ describe("Configuration", function()
     expect(success).to_be_false()
   end)
 
+  it("should default ide_name to the plain upstream label", function()
+    local applied = config.apply({})
+    expect(applied.ide_name.context).to_be(false)
+    expect(applied.ide_name.override).to_be_nil()
+  end)
+
+  it("should reject non-boolean ide_name.context", function()
+    local success, _ = pcall(function()
+      config.apply({ ide_name = { context = "yes" } })
+    end)
+    expect(success).to_be_false()
+  end)
+
   it("should accept valid auto_resize_terminal configuration", function()
     local user_config = {
       port_range = { min = 10000, max = 65535 },

@@ -20,6 +20,13 @@ M.defaults = {
   connection_wait_delay = 600, -- Milliseconds to wait after connection before sending queued @ mentions
   connection_timeout = 10000, -- Maximum time to wait for Claude Code to connect (milliseconds)
   queue_timeout = 5000, -- Maximum time to keep @ mentions in queue (milliseconds)
+  -- Label shown in the Claude CLI's /ide picker. context = true appends the
+  -- tmux session:window or working directory to tell instances apart.
+  ide_name = {
+    override = nil,
+    context = false,
+    tmux_include_pane = false,
+  },
   diff_opts = {
     layout = "vertical",
     open_in_new_tab = false, -- Open diff in a new tab (false = use current tab)
@@ -176,6 +183,21 @@ function M.validate(config)
   assert(is_valid_log_level, "log_level must be one of: " .. table.concat(valid_log_levels, ", "))
 
   assert(type(config.track_selection) == "boolean", "track_selection must be a boolean")
+  if config.ide_name ~= nil then
+    assert(type(config.ide_name) == "table", "ide_name must be a table")
+    assert(
+      config.ide_name.override == nil or type(config.ide_name.override) == "string",
+      "ide_name.override must be a string"
+    )
+    assert(
+      config.ide_name.context == nil or type(config.ide_name.context) == "boolean",
+      "ide_name.context must be a boolean"
+    )
+    assert(
+      config.ide_name.tmux_include_pane == nil or type(config.ide_name.tmux_include_pane) == "boolean",
+      "ide_name.tmux_include_pane must be a boolean"
+    )
+  end
   -- Allow absence in direct validate() calls; apply() supplies default
   if config.focus_after_send ~= nil then
     assert(type(config.focus_after_send) == "boolean", "focus_after_send must be a boolean")
