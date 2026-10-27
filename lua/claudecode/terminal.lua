@@ -2302,6 +2302,96 @@ function M.ensure_session()
 end
 
 ---Cleanup all terminal processes (called on Neovim exit).
+---Session id whose Claude terminal is on screen in the current tab, or nil.
+---@return string|nil session_id
+local function visible_session_in_tab()
+  local provider = get_provider()
+  if provider.get_session_window then
+    return (visible_tab_session(provider))
+  end
+  if provider.open_session then
+    local window_manager = require("claudecode.terminal.window_manager")
+    local win = window_manager.is_visible() and window_manager.get_window()
+    if win and vim.api.nvim_win_is_valid(win) then
+      local sess = session_manager.find_session_by_bufnr(vim.api.nvim_win_get_buf(win))
+      return sess and sess.id or nil
+    end
+    return nil
+  end
+  if is_terminal_visible(provider.get_active_bufnr()) then
+    return session_manager.get_active_session_id() or "default"
+  end
+  return nil
+end
+
+local visibility_depth = 0
+
+---Captures every return value with its count (nil holes included).
+---@return table results Array of all arguments, with `.n` set to the count.
+local function pack_results(...)
+  return { n = select("#", ...), ... }
+end
+
+---visible_session_in_tab that can never raise: event bookkeeping must not
+---break the terminal operation it observes.
+---@return string|nil
+local function safe_visible_session()
+  local ok, sid = pcall(visible_session_in_tab)
+  return ok and sid or nil
+end
+
+---Wraps a public terminal operation so it fires `User ClaudeCodeTerminalOpened`
+---when the current tab's Claude terminal goes from hidden to shown, and
+---`User ClaudeCodeTerminalHidden` for the reverse (data: { session_id }).
+---Only the outermost call fires (operations call each other), and only
+---plugin-driven changes are reported: closing the window by hand does not.
+---@param fn function
+---@return function
+local function with_visibility_events(fn)
+  return function(...)
+    if visibility_depth > 0 or not (vim.api and vim.api.nvim_exec_autocmds) then
+      return fn(...)
+    end
+    local before = safe_visible_session()
+    visibility_depth = visibility_depth + 1
+    local results = pack_results(pcall(fn, ...))
+    visibility_depth = visibility_depth - 1
+    if not results[1] then
+      error(results[2], 0)
+    end
+    local after = safe_visible_session()
+    if after and not before then
+      pcall(vim.api.nvim_exec_autocmds, "User", {
+        pattern = "ClaudeCodeTerminalOpened",
+        modeline = false,
+        data = { session_id = after },
+      })
+    elseif before and not after then
+      pcall(vim.api.nvim_exec_autocmds, "User", {
+        pattern = "ClaudeCodeTerminalHidden",
+        modeline = false,
+        data = { session_id = before },
+      })
+    end
+    return unpack(results, 2, results.n)
+  end
+end
+
+for _, name in ipairs({
+  "open",
+  "close",
+  "simple_toggle",
+  "focus_toggle",
+  "toggle_open_no_focus",
+  "ensure_visible",
+  "toggle",
+  "open_new_session",
+  "close_session",
+  "switch_to_session",
+}) do
+  M[name] = with_visibility_events(M[name])
+end
+
 ---Ensures no orphan Claude processes remain by killing all terminal jobs.
 ---Uses the configured cleanup_strategy to determine how processes are terminated.
 ---Implements defense-in-depth: recovers PIDs from sessions and terminal buffers

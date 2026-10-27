@@ -281,6 +281,53 @@ describe("multi-session terminal", function()
     end)
   end
 
+  describe("visibility events", function()
+    local events, autocmd_ids
+
+    before_each(function()
+      terminal.setup({ provider = "native", split_side = "right", split_width_percentage = SPLIT_FRACTION }, "sh")
+      events, autocmd_ids = {}, {}
+      for _, name in ipairs({ "ClaudeCodeTerminalOpened", "ClaudeCodeTerminalHidden" }) do
+        table.insert(
+          autocmd_ids,
+          vim.api.nvim_create_autocmd("User", {
+            pattern = name,
+            callback = function(ev)
+              table.insert(events, { name = name, session_id = ev.data and ev.data.session_id })
+            end,
+          })
+        )
+      end
+    end)
+
+    after_each(function()
+      for _, id in ipairs(autocmd_ids) do
+        pcall(vim.api.nvim_del_autocmd, id)
+      end
+      reset_terminals()
+    end)
+
+    it("fires Opened on show and Hidden on hide, once each, with the session id", function()
+      open_session()
+      local sid = terminal.get_active_session_id()
+      vim.cmd("ClaudeCode")
+
+      assert.are.same({
+        { name = "ClaudeCodeTerminalOpened", session_id = sid },
+        { name = "ClaudeCodeTerminalHidden", session_id = sid },
+      }, events)
+    end)
+
+    it("does not fire when switching sessions inside a visible terminal", function()
+      open_session()
+      vim.cmd("ClaudeCodeNew")
+      vim.cmd("ClaudeCodeSwitch 1")
+
+      assert.are.equal(1, #events, vim.inspect(events))
+      assert.are.equal("ClaudeCodeTerminalOpened", events[1].name)
+    end)
+  end)
+
   describe("diff focus", function()
     local diff = require("claudecode.diff")
     local base_config = require("claudecode").state.config

@@ -73,6 +73,15 @@ function M.start(config, auth_token)
         logger.debug("server", "No unbound session available for client", client.id)
       end
 
+      local connected = { client_id = client.id, session_id = target_session and target_session.id or nil }
+      vim.schedule(function()
+        pcall(vim.api.nvim_exec_autocmds, "User", {
+          pattern = "ClaudeCodeConnected",
+          modeline = false,
+          data = connected,
+        })
+      end)
+
       -- Notify main module about new connection for queue processing
       local main_module = require("claudecode")
       if main_module.process_mention_queue then
@@ -82,8 +91,25 @@ function M.start(config, auth_token)
       end
     end,
     on_disconnect = function(client, code, reason)
+      local bound_session = session_manager.find_session_by_client(client.id)
+      local disconnected = {
+        client_id = client.id,
+        session_id = bound_session and bound_session.id or nil,
+        code = code,
+        reason = reason,
+      }
       -- Unbind client from session before removing
       session_manager.unbind_client(client.id)
+      -- Pairs with ClaudeCodeConnected, which only fires after the handshake.
+      if client.handshake_complete then
+        vim.schedule(function()
+          pcall(vim.api.nvim_exec_autocmds, "User", {
+            pattern = "ClaudeCodeDisconnected",
+            modeline = false,
+            data = disconnected,
+          })
+        end)
+      end
       logger.debug(
         "server",
         "WebSocket client disconnected:",

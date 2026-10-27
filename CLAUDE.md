@@ -153,6 +153,9 @@ The plugin emits `User` autocmds (not config fields) that integrations can hook:
 
 - **`ClaudeCodeSendComplete`** - Fired in `M.send_at_mention` (init.lua) once per file, synchronously, when a send is accepted on the connected branch (acceptance-time, not delivery; not fired on the queued/disconnected path). `data = { file_path, start_line, end_line, context }` — `file_path` is the formatted path Claude received, lines are 0-indexed and may be nil. Primary use: focus an external Claude session (`provider = "none"`/`"external"`) where `focus_after_send` is inert. Emitted via the guarded, pcall-wrapped `fire_send_complete` helper (no-op when `vim.api.nvim_exec_autocmds` is absent, e.g. minimal test stubs). See `lua/claudecode/types.lua` `ClaudeCodeSendCompleteData` and README "Events".
 
+- **`ClaudeCodeConnected` / `ClaudeCodeDisconnected`** - Scheduled from `server/init.lua`. `on_connect` runs only after the authenticated WebSocket handshake (`client.on_open`, set in `server/tcp.lua`), never at TCP accept, so an unauthenticated socket neither binds a session nor fires these. `data = { client_id, session_id }` (+ `code`, `reason` on disconnect).
+- **`ClaudeCodeTerminalOpened` / `ClaudeCodeTerminalHidden`** - Fired by `terminal.lua`'s public operations (wrapped by `with_visibility_events`, outermost call only) when the current tab's Claude terminal goes hidden -> shown or back. `data = { session_id }`. Manual `:q` on the window does not fire.
+
 ## MCP Protocol Compliance
 
 ### Protocol Implementation Status

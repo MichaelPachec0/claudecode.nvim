@@ -469,6 +469,27 @@ vim.api.nvim_create_autocmd("User", {
 })
 ```
 
+### Connection and terminal events
+
+| event                      | fired when                                                               | `data`                                      |
+| -------------------------- | ------------------------------------------------------------------------ | ------------------------------------------- |
+| `ClaudeCodeConnected`      | A Claude CLI completes the **authenticated** WebSocket handshake         | `client_id`, `session_id` (nil if unbound)  |
+| `ClaudeCodeDisconnected`   | A client that had connected goes away                                    | `client_id`, `session_id`, `code`, `reason` |
+| `ClaudeCodeTerminalOpened` | A claudecode command or API call shows the current tab's Claude terminal | `session_id`                                |
+| `ClaudeCodeTerminalHidden` | A claudecode command or API call hides the current tab's Claude terminal | `session_id`                                |
+
+The connection events are scheduled (they run on the next event-loop tick). A socket that never passes authentication fires neither. The terminal events fire once per show or hide, not when switching sessions inside a terminal that stays visible, and not when you close the window by hand (`:q`). Example, a statusline flag:
+
+```lua
+vim.api.nvim_create_autocmd("User", {
+  pattern = { "ClaudeCodeConnected", "ClaudeCodeDisconnected" },
+  callback = function(ev)
+    vim.g.claude_connected = ev.match == "ClaudeCodeConnected"
+    vim.cmd.redrawstatus()
+  end,
+})
+```
+
 ## Multi-Session Support
 
 Run multiple Claude Code sessions simultaneously:
