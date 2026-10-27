@@ -2,7 +2,9 @@
 ---Drives the native provider with `sh` as the terminal command and checks the
 ---behavior the unit tests can only mock: split sizing and pinning, hide/show,
 ---session create/switch/close in the one managed window, send_to_terminal
----routing, and that cleanup_all leaves no grandchild processes behind.
+---routing, that cleanup_all leaves no grandchild processes behind, and that
+---diff_opts.keep_terminal_focus returns focus to the active session when a
+---blocking openDiff opens and when it is accepted or denied.
 ---
 ---Under the plain busted + LuaJIT suite these are reported as pending. Run them
 ---inside Neovim with plenary.nvim on the runtimepath, from the repo root:
@@ -75,6 +77,20 @@ describe("multi-session terminal", function()
     return out == "" and {} or vim.split(out, "\n")
   end
 
+  ---Closes every session, stops their jobs and drops back to one window.
+  local function reset_terminals()
+    for _, session in ipairs(terminal.list_sessions()) do
+      pcall(terminal.close_session, session.id)
+    end
+    pcall(terminal.cleanup_all)
+    vim.cmd("silent! tabonly! | silent! only!")
+    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.bo[buf].buftype == "terminal" then
+        pcall(vim.api.nvim_buf_delete, buf, { force = true })
+      end
+    end
+  end
+
   for _, side in ipairs({ "right", "bottom" }) do
     local horizontal = side == "bottom"
 
@@ -83,18 +99,7 @@ describe("multi-session terminal", function()
         terminal.setup({ provider = "native", split_side = side, split_width_percentage = SPLIT_FRACTION }, "sh")
       end)
 
-      after_each(function()
-        for _, session in ipairs(terminal.list_sessions()) do
-          pcall(terminal.close_session, session.id)
-        end
-        pcall(terminal.cleanup_all)
-        vim.cmd("silent! tabonly! | silent! only!")
-        for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-          if vim.bo[buf].buftype == "terminal" then
-            pcall(vim.api.nvim_buf_delete, buf, { force = true })
-          end
-        end
-      end)
+      after_each(reset_terminals)
 
       it("opens one sized, pinned Claude window", function()
         local win = open_session()
@@ -229,4 +234,120 @@ describe("multi-session terminal", function()
       end)
     end)
   end
+
+  describe("diff focus", function()
+    local diff = require("claudecode.diff")
+    local base_config = require("claudecode").state.config
+    local target_file
+
+    ---Re-points the diff module at a config with the given keep_terminal_focus.
+    local function set_keep_terminal_focus(enabled)
+      diff.setup(vim.tbl_deep_extend("force", base_config, { diff_opts = { keep_terminal_focus = enabled } }))
+    end
+
+    ---Starts a blocking openDiff the way the MCP tool does (inside a coroutine)
+    ---and returns a getter for the result Claude would receive.
+    local function open_blocking_diff(tab_name)
+      local result
+      local co = coroutine.create(function()
+        return diff.open_diff_blocking(target_file, target_file, "proposed\n", tab_name)
+      end)
+      _G.claude_deferred_responses = _G.claude_deferred_responses or {}
+      _G.claude_deferred_responses[tostring(co)] = function(r)
+        result = r
+      end
+      local ok, err = coroutine.resume(co)
+      assert.is_true(ok, tostring(err))
+      return function()
+        return result
+      end
+    end
+
+    ---The window showing the proposed-changes buffer of the diff.
+    local function proposed_win()
+      for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+        if vim.b[vim.api.nvim_win_get_buf(win)].claudecode_diff_tab_name then
+          return win
+        end
+      end
+    end
+
+    before_each(function()
+      terminal.setup({ provider = "native", split_side = "right", split_width_percentage = SPLIT_FRACTION }, "sh")
+      target_file = vim.fn.tempname() .. ".txt"
+      vim.fn.writefile({ "original" }, target_file)
+    end)
+
+    after_each(function()
+      -- Opening a diff with keep_terminal_focus schedules a refocus; run any
+      -- pending one now so it cannot move focus during the next test.
+      vim.wait(50)
+      pcall(diff.close_all_diffs, "test teardown")
+      diff.setup(base_config)
+      reset_terminals()
+      os.remove(target_file)
+    end)
+
+    it("keeps focus on the active session after a diff opens and after accept", function()
+      open_session()
+      vim.cmd("ClaudeCodeNew")
+      vim.cmd("ClaudeCodeSwitch 1")
+      local active_buf = vim.api.nvim_win_get_buf(only_claude_win())
+      vim.cmd("wincmd p") -- start from the editor window, as a user would
+      set_keep_terminal_focus(true)
+
+      local get_result = open_blocking_diff("focus-accept")
+
+      assert.is_not_nil(proposed_win(), "diff did not open")
+      assert.is_true(
+        vim.wait(1000, function()
+          return vim.api.nvim_get_current_buf() == active_buf
+        end, 20),
+        "focus did not return to the active session after the diff opened"
+      )
+
+      vim.api.nvim_set_current_win(proposed_win())
+      vim.cmd("ClaudeCodeDiffAccept")
+
+      assert.are.equal(active_buf, vim.api.nvim_get_current_buf())
+      assert.is_nil(proposed_win(), "diff window survived accept")
+      assert.is_true(vim.wait(1000, function()
+        return get_result() ~= nil
+      end, 20))
+      assert.are.equal("FILE_SAVED", get_result().content[1].text)
+    end)
+
+    it("returns focus to the active session after deny", function()
+      local active_buf = vim.api.nvim_win_get_buf(open_session())
+      vim.cmd("wincmd p")
+      set_keep_terminal_focus(true)
+
+      local get_result = open_blocking_diff("focus-deny")
+      assert.is_true(
+        vim.wait(1000, function()
+          return vim.api.nvim_get_current_buf() == active_buf
+        end, 20),
+        "focus did not return to the active session after the diff opened"
+      )
+      vim.api.nvim_set_current_win(proposed_win())
+      vim.cmd("ClaudeCodeDiffDeny")
+
+      assert.are.equal(active_buf, vim.api.nvim_get_current_buf())
+      assert.is_true(vim.wait(1000, function()
+        return get_result() ~= nil
+      end, 20))
+      assert.are.equal("DIFF_REJECTED", get_result().content[1].text)
+    end)
+
+    it("leaves focus in the diff when keep_terminal_focus is off", function()
+      open_session()
+      vim.cmd("wincmd p")
+      set_keep_terminal_focus(false)
+
+      open_blocking_diff("focus-off")
+      vim.wait(100) -- let any scheduled refocus run
+
+      assert.are.equal(proposed_win(), vim.api.nvim_get_current_win())
+    end)
+  end)
 end)
