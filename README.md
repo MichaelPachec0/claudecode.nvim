@@ -574,6 +574,13 @@ For deep technical details, see [ARCHITECTURE.md](./ARCHITECTURE.md).
   opts = {
     -- Server Configuration
     port_range = { min = 10000, max = 65535 },
+    -- IP address the IDE server listens on. Leave it on loopback unless Claude runs
+    -- somewhere 127.0.0.1 cannot reach Neovim (e.g. a container): then use the
+    -- narrowest address that works, such as the container bridge ("172.17.0.1"),
+    -- not "0.0.0.0". Off loopback, anything that can reach that address can try to
+    -- connect; only the auth token protects the server, and it travels unencrypted.
+    -- A warning is logged at startup whenever this is not a loopback address.
+    bind_address = "127.0.0.1",
     auto_start = true,
     log_level = "info", -- "trace", "debug", "info", "warn", "error"
     terminal_cmd = nil, -- Custom terminal command (default: "claude")

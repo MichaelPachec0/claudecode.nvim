@@ -122,6 +122,7 @@
 -- Main configuration structure
 ---@class ClaudeCodeConfig
 ---@field port_range ClaudeCodePortRange
+---@field bind_address string? IP address the IDE server listens on (default "127.0.0.1")
 ---@field auto_start boolean
 ---@field terminal_cmd string|nil
 ---@field env table<string, string>

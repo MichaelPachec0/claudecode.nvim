@@ -362,7 +362,7 @@ Log levels for authentication events:
 
 ### Security Considerations
 
-- WebSocket server only accepts local connections (127.0.0.1) for security
+- WebSocket server listens on loopback (127.0.0.1) by default. `bind_address` can move it to another IP literal (containers); `server/tcp.lua` logs a WARN at startup whenever that address is not loopback (`tcp.is_loopback`), because off loopback only the unencrypted auth token protects it
 - Authentication tokens are 128-bit tokens (32-char lowercase hex) from the OS CSPRNG
 - Lock files created at `~/.claude/ide/[port].lock` for Claude CLI discovery
 - All authentication events are logged for security auditing

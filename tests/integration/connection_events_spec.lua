@@ -145,6 +145,31 @@ describe("connection events", function()
     session_manager.reset()
   end)
 
+  it("listens only on the configured bind_address", function()
+    if vim.fn.has("linux") == 0 then
+      pending("relies on Linux routing all of 127.0.0.0/8 to loopback")
+      return
+    end
+    claudecode.stop()
+    claudecode.setup({ auto_start = false, log_level = "error", bind_address = "127.0.0.2" })
+    assert.is_true(claudecode.start(false))
+    local uv = vim.uv or vim.loop
+    local results = {}
+    for _, host in ipairs({ "127.0.0.2", "127.0.0.1" }) do
+      local probe = uv.new_tcp()
+      probe:connect(host, claudecode.state.port, function(err)
+        results[host] = err or "connected"
+        probe:close()
+      end)
+    end
+
+    assert.is_true(vim.wait(2000, function()
+      return results["127.0.0.2"] ~= nil and results["127.0.0.1"] ~= nil
+    end, 20))
+    assert.are.equal("connected", results["127.0.0.2"])
+    assert.is_truthy(tostring(results["127.0.0.1"]):find("ECONNREFUSED", 1, true), tostring(results["127.0.0.1"]))
+  end)
+
   it("does not fire Connected for a rejected token", function()
     connect(string.rep("0", 32))
 

@@ -9,6 +9,9 @@ local M = {}
 ---@type ClaudeCodeConfig
 M.defaults = {
   port_range = { min = 10000, max = 65535 },
+  -- IP address the IDE server listens on. Keep the loopback default unless Claude
+  -- runs where 127.0.0.1 cannot reach Neovim (e.g. inside a container).
+  bind_address = "127.0.0.1",
   auto_start = true,
   terminal_cmd = nil,
   env = {}, -- Custom environment variables for Claude terminal
@@ -76,6 +79,22 @@ function M.validate(config)
   )
 
   assert(type(config.auto_start) == "boolean", "auto_start must be a boolean")
+
+  if config.bind_address ~= nil then
+    local addr = config.bind_address
+    local ipv4 = type(addr) == "string" and { addr:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$") }
+    local valid_ipv4 = ipv4 and #ipv4 == 4
+    if valid_ipv4 then
+      for _, octet in ipairs(ipv4) do
+        valid_ipv4 = valid_ipv4 and tonumber(octet) <= 255
+      end
+    end
+    local valid_ipv6 = type(addr) == "string" and addr:find(":", 1, true) ~= nil and addr:match("^[%x:.]+$") ~= nil
+    assert(
+      valid_ipv4 or valid_ipv6,
+      'bind_address must be an IPv4 or IPv6 address literal (e.g. "127.0.0.1"), not a hostname'
+    )
+  end
 
   assert(config.terminal_cmd == nil or type(config.terminal_cmd) == "string", "terminal_cmd must be nil or a string")
 

@@ -13,6 +13,7 @@ local PEER_DISCONNECT_ERRORS = {
 ---@class TCPServer
 ---@field server table The vim.loop TCP server handle
 ---@field port number The port the server is listening on
+---@field bind_address string IP address the server listens on (default "127.0.0.1")
 ---@field auth_token string|nil The authentication token for validating connections
 ---@field clients table<string, WebSocketClient> Table of connected clients
 ---@field on_message function Callback for WebSocket messages
@@ -67,6 +68,14 @@ local function port_iterator(min_port, max_port)
   end
 end
 
+---True for loopback addresses (127.0.0.0/8, ::1, IPv4-mapped 127.x), the only
+---ones that keep the IDE server unreachable from other machines.
+---@param address string
+---@return boolean
+function M.is_loopback(address)
+  return address:match("^127%.") ~= nil or address == "::1" or address:lower():match("^::ffff:127%.") ~= nil
+end
+
 ---Find an available port using a best-effort bind probe.
 ---NOTE: this is only a pre-filter. A successful throwaway bind does NOT guarantee
 ---the port is free: libuv's bind() defers EADDRINUSE to listen()/connect(), so a
@@ -74,8 +83,10 @@ end
 ---authoritative check is create_server's bind+listen with retry.
 ---@param min_port number Minimum port to try
 ---@param max_port number Maximum port to try
+---@param host string|nil Address to probe (default "127.0.0.1")
 ---@return number|nil port Available port number, or nil if none found
-function M.find_available_port(min_port, max_port)
+function M.find_available_port(min_port, max_port, host)
+  host = host or "127.0.0.1"
   assert(type(min_port) == "number", "min_port must be a number")
   assert(type(max_port) == "number", "max_port must be a number")
 
@@ -86,7 +97,7 @@ function M.find_available_port(min_port, max_port)
   for port in port_iterator(min_port, max_port) do
     local test_server = vim.loop.new_tcp()
     if test_server then
-      local success = test_server:bind("127.0.0.1", port)
+      local success = test_server:bind(host, port)
       test_server:close()
 
       if success then
@@ -113,7 +124,7 @@ function M._bind_and_listen(server, port)
     return nil, "Failed to create TCP server"
   end
 
-  local bind_success, bind_err = handle:bind("127.0.0.1", port)
+  local bind_success, bind_err = handle:bind(server.bind_address or "127.0.0.1", port)
   if not bind_success then
     handle:close()
     return nil, "Failed to bind to port " .. port .. ": " .. (bind_err or "unknown error")
@@ -150,6 +161,7 @@ function M.create_server(config, callbacks, auth_token)
   local server = {
     server = nil,
     port = nil,
+    bind_address = config.bind_address or "127.0.0.1",
     auth_token = auth_token,
     clients = {},
     on_message = callbacks.on_message or function() end,
@@ -170,6 +182,17 @@ function M.create_server(config, callbacks, auth_token)
     if handle then
       server.server = handle
       server.port = port
+      if not M.is_loopback(server.bind_address) then
+        require("claudecode.logger").warn(
+          "server",
+          "Listening on "
+            .. server.bind_address
+            .. ":"
+            .. port
+            .. " (bind_address is not loopback). Anything that can reach that address can try to"
+            .. " connect; only the auth token protects the server, and it is sent unencrypted."
+        )
+      end
       return server, nil
     end
     last_err = err

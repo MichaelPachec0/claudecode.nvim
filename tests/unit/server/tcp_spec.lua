@@ -97,7 +97,8 @@ describe("TCP server disconnect handling", function()
     -- a string => fail with that message (return nil, msg).
     local function make_handle(records, bind_result, listen_result)
       local handle = { closed = false }
-      handle.bind = function(_, _host, port)
+      handle.bind = function(_, host, port)
+        handle.bound_host = host
         handle.bound_port = port
         if bind_result == true then
           return 0
@@ -162,6 +163,38 @@ describe("TCP server disconnect handling", function()
       for _, h in ipairs(handles) do
         assert.is_true(h.closed)
       end
+    end)
+
+    it("binds to 127.0.0.1 by default and to config.bind_address when set", function()
+      local handles = {}
+      vim.loop.new_tcp = new_tcp_from_specs(handles, {})
+
+      local default_server = tcp.create_server({ port_range = { min = 10000, max = 10000 } }, {}, nil)
+      local custom_server = tcp.create_server(
+        { port_range = { min = 10000, max = 10000 }, bind_address = "172.17.0.1" },
+        {},
+        nil
+      )
+
+      assert.are.equal("127.0.0.1", handles[1].bound_host)
+      assert.are.equal("127.0.0.1", default_server.bind_address)
+      assert.are.equal("172.17.0.1", handles[2].bound_host)
+      assert.are.equal("172.17.0.1", custom_server.bind_address)
+    end)
+
+    it("warns only when listening on a non-loopback address", function()
+      local warnings = {}
+      local warn_stub = require("luassert.stub")(require("claudecode.logger"), "warn", function(_, msg)
+        table.insert(warnings, msg)
+      end)
+      vim.loop.new_tcp = new_tcp_from_specs({}, {})
+
+      tcp.create_server({ port_range = { min = 10000, max = 10000 }, bind_address = "127.0.0.1" }, {}, nil)
+      tcp.create_server({ port_range = { min = 10000, max = 10000 }, bind_address = "0.0.0.0" }, {}, nil)
+      warn_stub:revert()
+
+      assert.are.equal(1, #warnings)
+      assert.is_truthy(warnings[1]:find("0.0.0.0:10000", 1, true))
     end)
 
     it("treats bind-success-but-listen-EADDRINUSE as unavailable", function()
@@ -367,5 +400,16 @@ describe("TCP server disconnect handling", function()
     -- Simulate a later EOF after the CLOSE path already removed the client.
     client.tcp_handle._read_cb(nil, nil)
     assert.spy(callbacks.on_disconnect).was_called(1)
+  end)
+
+  describe("is_loopback", function()
+    it("recognizes loopback addresses only", function()
+      for _, addr in ipairs({ "127.0.0.1", "127.1.2.3", "::1", "::ffff:127.0.0.1" }) do
+        assert.is_true(tcp.is_loopback(addr), addr)
+      end
+      for _, addr in ipairs({ "0.0.0.0", "172.17.0.1", "::", "10.0.0.5" }) do
+        assert.is_false(tcp.is_loopback(addr), addr)
+      end
+    end)
   end)
 end)
