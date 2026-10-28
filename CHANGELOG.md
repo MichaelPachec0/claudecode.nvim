@@ -12,6 +12,7 @@
 - `claudecode` filetype set on the terminal buffer ([#202](https://github.com/coder/claudecode.nvim/pull/202)).
 - Shift+Enter inserts a newline into the native terminal instead of submitting ([#203](https://github.com/coder/claudecode.nvim/pull/203)).
 - `ide_name` option to tell several Neovim instances apart in the Claude CLI's `/ide` picker: `context = true` labels this one `Neovim [tmux:session:window]` (of Neovim's own pane) or `Neovim [~/project]`, and `override` sets an exact label. The default label stays `Neovim` (based on [#247](https://github.com/coder/claudecode.nvim/pull/247)).
+- `require("claudecode.terminal").reposition(opts)` moves the running Snacks session to a new layout (float <-> split) without restarting Claude; the new layout also survives hide/show (based on [#226](https://github.com/coder/claudecode.nvim/pull/226)).
 - `User` autocmds `ClaudeCodeConnected`/`ClaudeCodeDisconnected` (a Claude CLI completed or lost its authenticated connection) and `ClaudeCodeTerminalOpened`/`ClaudeCodeTerminalHidden` (claudecode showed or hid the current tab's terminal), each carrying the session id (based on [#227](https://github.com/coder/claudecode.nvim/pull/227)).
 
 ### Fixed

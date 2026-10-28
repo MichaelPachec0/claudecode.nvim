@@ -2088,6 +2088,26 @@ function M.open_new_session(opts_override, cmd_args)
   return session_id
 end
 
+---Moves the current tab's active Claude terminal to a new layout without
+---restarting Claude, e.g. from a float to a right split:
+---  require("claudecode.terminal").reposition({ snacks_win_opts = { position = "right" } })
+---Supported by the Snacks provider (`reposition_session`); other providers
+---warn and do nothing.
+---@param opts_override table|nil Terminal overrides, typically snacks_win_opts
+---@return boolean moved
+function M.reposition(opts_override)
+  local provider = get_provider()
+  if not provider.reposition_session then
+    vim.notify("claudecode: reposition is only supported by the snacks terminal provider", vim.log.levels.WARN)
+    return false
+  end
+  local sid = current_tab_session()
+  if not sid then
+    return false
+  end
+  return provider.reposition_session(sid, build_config(opts_override)) == true
+end
+
 ---Working directory of the current tab's active session's Claude process, or
 ---nil when no session with a live terminal is active. Paths sent to Claude
 ---(@ mentions) are made relative to this, not to Neovim's own cwd, because

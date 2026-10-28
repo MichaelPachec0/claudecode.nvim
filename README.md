@@ -776,6 +776,20 @@ require("claudecode").setup({
 
 The `snacks_win_opts` configuration allows you to create floating Claude Code terminals with custom positioning, sizing, and key bindings. Here are several practical examples:
 
+### Switching Between Float and Split
+
+`require("claudecode.terminal").reposition(opts)` moves the running session to a new layout without restarting Claude (Snacks provider only). It takes the same overrides as the terminal config, typically `snacks_win_opts`:
+
+```lua
+local float = { position = "float", width = 0.8, height = 0.8 }
+local split = { position = "right", width = 0.35 }
+local is_float = true
+vim.keymap.set({ "n", "t" }, "<leader>cp", function()
+  is_float = not is_float
+  require("claudecode.terminal").reposition({ snacks_win_opts = is_float and float or split })
+end, { desc = "Claude: toggle float/split" })
+```
+
 ### Basic Floating Window with Ctrl+, Toggle
 
 ```lua

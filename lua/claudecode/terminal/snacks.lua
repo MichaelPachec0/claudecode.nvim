@@ -1339,6 +1339,36 @@ function M.get_session_window(session_id)
   return nil
 end
 
+---Moves a session's terminal to a new window layout (e.g. float <-> split)
+---without restarting Claude. The window is closed for real rather than parked
+---(a parked float would come back as a float), the new snacks_win_opts are
+---merged into the Snacks instance so its own show() uses them, and the
+---session is shown and focused in the current tabpage.
+---@param session_id string
+---@param config table Effective terminal config carrying the new snacks_win_opts
+---@return boolean moved
+function M.reposition_session(session_id, config)
+  local term = terminals[session_id]
+  if not (term and term.buf and vim.api.nvim_buf_is_valid(term.buf)) then
+    return false
+  end
+  if term.backdrop and term.backdrop.win and vim.api.nvim_win_is_valid(term.backdrop.win) then
+    pcall(vim.api.nvim_win_close, term.backdrop.win, true)
+  end
+  if term.win and vim.api.nvim_win_is_valid(term.win) then
+    if not pcall(vim.api.nvim_win_close, term.win, true) then
+      return false -- last window in the tabpage (E444): nowhere to move to
+    end
+  end
+  term.win = nil
+  term.opts = vim.tbl_deep_extend("force", term.opts or {}, (config and config.snacks_win_opts) or {})
+  if term._cc then
+    term._cc.kind = nil
+    term._cc.config = config
+  end
+  return cc_show(term, true, config)
+end
+
 ---Park a session's instance (float config-hidden, split closed); the buffer
 ---and Claude process stay alive.
 ---@param session_id string The session ID
