@@ -41,6 +41,10 @@ M.state = {
   demotion_timer = nil,
   visual_demotion_delay_ms = 50,
 
+  -- Lua pattern matched against the lowercased buffer name of terminals that
+  -- selection tracking must ignore (false disables name matching).
+  terminal_filter_pattern = "^term://.*claude",
+
   -- Cursor position captured when a visual selection is flushed on visual-mode exit.
   -- Demotion only fires once the cursor actually moves away from this position, so a
   -- held selection persists (see issue #246 and M.flush_visual_selection).
@@ -56,7 +60,7 @@ M.state = {
 ---Enables selection tracking.
 ---@param server table The server object to use for communication.
 ---@param visual_demotion_delay_ms number The delay for visual selection demotion.
-function M.enable(server, visual_demotion_delay_ms)
+function M.enable(server, visual_demotion_delay_ms, terminal_filter_pattern)
   if M.state.tracking_enabled then
     return
   end
@@ -64,6 +68,9 @@ function M.enable(server, visual_demotion_delay_ms)
   M.state.tracking_enabled = true
   M.server = server
   M.state.visual_demotion_delay_ms = visual_demotion_delay_ms
+  if terminal_filter_pattern ~= nil then
+    M.state.terminal_filter_pattern = terminal_filter_pattern
+  end
 
   M._create_autocommands()
   M._setup_mouse_handler()
@@ -293,6 +300,28 @@ function M.debounce_update()
 end
 
 ---Updates the current selection state.
+---True for buffers selection tracking must ignore: the Claude terminals this
+---plugin created (flagged b:claudecode_terminal, whatever terminal_cmd is
+---called), plus terminals whose lowercased name matches
+---terminal_filter_pattern (default "^term://.*claude"), which also covers
+---Claude running in a terminal another plugin opened (e.g. sidekick.nvim).
+---@param bufnr integer
+---@param buf_name string|nil
+---@return boolean
+local function is_ignored_terminal(bufnr, buf_name)
+  local ok, flagged = pcall(function()
+    return vim.b[bufnr].claudecode_terminal
+  end)
+  if ok and flagged == true then
+    return true
+  end
+  local pattern = M.state.terminal_filter_pattern
+  if not pattern or not buf_name then
+    return false
+  end
+  return buf_name:lower():match(pattern) ~= nil
+end
+
 ---Determines the current selection based on the editor mode (visual or normal)
 ---and sends an update to the server if the selection has changed.
 function M.update_selection()
@@ -303,8 +332,8 @@ function M.update_selection()
   local current_buf = vim.api.nvim_get_current_buf()
   local buf_name = vim.api.nvim_buf_get_name(current_buf)
 
-  -- If the buffer name starts with "term://" and contains "claude", do not update selection
-  if buf_name and buf_name:match("^term://") and buf_name:lower():find("claude", 1, true) then
+  -- Never treat a Claude terminal as an editor selection
+  if is_ignored_terminal(current_buf, buf_name) then
     -- Optionally, cancel demotion timer like for the terminal
     M._cancel_demotion_timer()
     return
@@ -784,7 +813,7 @@ function M.flush_visual_selection()
   local current_buf = vim.api.nvim_get_current_buf()
   local buf_name = vim.api.nvim_buf_get_name(current_buf)
 
-  if buf_name and buf_name:match("^term://") and buf_name:lower():find("claude", 1, true) then
+  if is_ignored_terminal(current_buf, buf_name) then
     return
   end
   if terminal then

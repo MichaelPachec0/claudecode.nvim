@@ -214,6 +214,18 @@ describe("Configuration", function()
     expect(success).to_be_false()
   end)
 
+  it("should default terminal_filter_pattern to the claude terminal pattern", function()
+    expect(config.apply({}).terminal_filter_pattern).to_be("^term://.*claude")
+    expect(config.apply({ terminal_filter_pattern = false }).terminal_filter_pattern).to_be(false)
+  end)
+
+  it("should reject a malformed terminal_filter_pattern", function()
+    local success, _ = pcall(function()
+      config.apply({ terminal_filter_pattern = "[" })
+    end)
+    expect(success).to_be_false()
+  end)
+
   it("should accept valid auto_resize_terminal configuration", function()
     local user_config = {
       port_range = { min = 10000, max = 65535 },

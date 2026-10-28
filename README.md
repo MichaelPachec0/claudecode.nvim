@@ -590,6 +590,10 @@ For deep technical details, see [ARCHITECTURE.md](./ARCHITECTURE.md).
     -- Selection Tracking
     track_selection = true,
     visual_demotion_delay_ms = 50,
+    -- Terminals selection tracking ignores, besides Claude's own (always ignored):
+    -- a Lua pattern on the lowercased buffer name, or false. Set it when Claude
+    -- runs in another plugin's terminal (e.g. sidekick.nvim) named without "claude".
+    terminal_filter_pattern = "^term://.*claude",
 
     -- Label in the Claude CLI's /ide picker (default "Neovim"). With several
     -- Neovim instances open, context = true tells them apart:

@@ -138,6 +138,7 @@
 ---@field enable_broadcast_debouncing_in_tests? boolean
 ---@field terminal ClaudeCodeTerminalConfig?
 ---@field ide_name ClaudeCodeIdeNameConfig?
+---@field terminal_filter_pattern string|false? Lua pattern for terminal buffer names selection tracking ignores
 
 -- Label the Claude CLI shows for this instance in its /ide picker
 ---@class ClaudeCodeIdeNameConfig

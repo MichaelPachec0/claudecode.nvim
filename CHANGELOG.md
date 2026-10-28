@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Selection tracking no longer sends the Claude terminal's own contents to Claude as your selection when `terminal_cmd` is named without "claude" (a wrapper script, an alias): the plugin's terminals are recognized by their buffer flag, not their name. A new `terminal_filter_pattern` option (default `"^term://.*claude"`, `false` to disable) covers Claude running in another plugin's terminal (based on [#207](https://github.com/coder/claudecode.nvim/pull/207)).
 - `:ClaudeCode --resume` (and other arguments, including `:ClaudeCodeAgents`) no longer get silently dropped when a Claude session is already running: arguments that differ from the running session's start a separate session, which leaves the existing one running; repeating the same arguments toggles as before (based on [#199](https://github.com/coder/claudecode.nvim/pull/199)).
 - `:ClaudeCodeDiffAccept`/`:ClaudeCodeDiffDeny` work from any window of the tab, such as the Claude terminal or the original-file side, instead of only from the proposed-changes buffer; with two different Claude diffs in the tab they warn instead of guessing (based on [#211](https://github.com/coder/claudecode.nvim/pull/211)).
 - Open file buffers are reloaded (one debounced `:checktime`, only with `'autoread'` on) after Claude's tool calls, so files Claude edited on disk no longer stay stale while focus is in the terminal (based on [#219](https://github.com/coder/claudecode.nvim/pull/219)).

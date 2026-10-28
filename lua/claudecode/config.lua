@@ -17,6 +17,9 @@ M.defaults = {
   -- When true, focus Claude terminal after a successful send while connected
   focus_after_send = false,
   visual_demotion_delay_ms = 50, -- Milliseconds to wait before demoting a visual selection
+  -- Terminals whose lowercased buffer name matches this Lua pattern are ignored by
+  -- selection tracking (Claude's own terminals are always ignored). false = off.
+  terminal_filter_pattern = "^term://.*claude",
   connection_wait_delay = 600, -- Milliseconds to wait after connection before sending queued @ mentions
   connection_timeout = 10000, -- Maximum time to wait for Claude Code to connect (milliseconds)
   queue_timeout = 5000, -- Maximum time to keep @ mentions in queue (milliseconds)
@@ -183,6 +186,12 @@ function M.validate(config)
   assert(is_valid_log_level, "log_level must be one of: " .. table.concat(valid_log_levels, ", "))
 
   assert(type(config.track_selection) == "boolean", "track_selection must be a boolean")
+  assert(
+    config.terminal_filter_pattern == nil
+      or config.terminal_filter_pattern == false
+      or (type(config.terminal_filter_pattern) == "string" and pcall(string.match, "", config.terminal_filter_pattern)),
+    "terminal_filter_pattern must be a valid Lua pattern string or false"
+  )
   if config.ide_name ~= nil then
     assert(type(config.ide_name) == "table", "ide_name must be a table")
     assert(
