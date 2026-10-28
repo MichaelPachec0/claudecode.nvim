@@ -9,6 +9,9 @@ local M = {}
 ---@type ClaudeCodeConfig
 M.defaults = {
   port_range = { min = 10000, max = 65535 },
+  -- IP address the IDE server listens on. Keep the loopback default unless Claude
+  -- runs where 127.0.0.1 cannot reach Neovim (e.g. inside a container).
+  bind_address = "127.0.0.1",
   auto_start = true,
   terminal_cmd = nil,
   env = {}, -- Custom environment variables for Claude terminal
@@ -17,9 +20,19 @@ M.defaults = {
   -- When true, focus Claude terminal after a successful send while connected
   focus_after_send = false,
   visual_demotion_delay_ms = 50, -- Milliseconds to wait before demoting a visual selection
+  -- Terminals whose lowercased buffer name matches this Lua pattern are ignored by
+  -- selection tracking (Claude's own terminals are always ignored). false = off.
+  terminal_filter_pattern = "^term://.*claude",
   connection_wait_delay = 600, -- Milliseconds to wait after connection before sending queued @ mentions
   connection_timeout = 10000, -- Maximum time to wait for Claude Code to connect (milliseconds)
   queue_timeout = 5000, -- Maximum time to keep @ mentions in queue (milliseconds)
+  -- Label shown in the Claude CLI's /ide picker. context = true appends the
+  -- tmux session:window or working directory to tell instances apart.
+  ide_name = {
+    override = nil,
+    context = false,
+    tmux_include_pane = false,
+  },
   diff_opts = {
     layout = "vertical",
     open_in_new_tab = false, -- Open diff in a new tab (false = use current tab)
@@ -67,6 +80,22 @@ function M.validate(config)
 
   assert(type(config.auto_start) == "boolean", "auto_start must be a boolean")
 
+  if config.bind_address ~= nil then
+    local addr = config.bind_address
+    local ipv4 = type(addr) == "string" and { addr:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$") }
+    local valid_ipv4 = ipv4 and #ipv4 == 4
+    if valid_ipv4 then
+      for _, octet in ipairs(ipv4) do
+        valid_ipv4 = valid_ipv4 and tonumber(octet) <= 255
+      end
+    end
+    local valid_ipv6 = type(addr) == "string" and addr:find(":", 1, true) ~= nil and addr:match("^[%x:.]+$") ~= nil
+    assert(
+      valid_ipv4 or valid_ipv6,
+      'bind_address must be an IPv4 or IPv6 address literal (e.g. "127.0.0.1"), not a hostname'
+    )
+  end
+
   assert(config.terminal_cmd == nil or type(config.terminal_cmd) == "string", "terminal_cmd must be nil or a string")
 
   -- Validate terminal config
@@ -93,6 +122,78 @@ function M.validate(config)
     end
   end
 
+  -- Validate terminal keymaps if present
+  if config.terminal.keymaps then
+    assert(type(config.terminal.keymaps) == "table", "terminal.keymaps must be a table")
+    if config.terminal.keymaps.exit_terminal ~= nil then
+      local exit_type = type(config.terminal.keymaps.exit_terminal)
+      assert(
+        exit_type == "string" or (exit_type == "boolean" and config.terminal.keymaps.exit_terminal == false),
+        "terminal.keymaps.exit_terminal must be a string or false"
+      )
+    end
+  end
+
+  -- Validate terminal tabs config if present
+  if config.terminal.tabs then
+    assert(type(config.terminal.tabs) == "table", "terminal.tabs must be a table")
+    if config.terminal.tabs.enabled ~= nil then
+      assert(type(config.terminal.tabs.enabled) == "boolean", "terminal.tabs.enabled must be a boolean")
+    end
+    if config.terminal.tabs.height ~= nil then
+      assert(
+        type(config.terminal.tabs.height) == "number" and config.terminal.tabs.height >= 1,
+        "terminal.tabs.height must be a number >= 1"
+      )
+    end
+    if config.terminal.tabs.mouse_enabled ~= nil then
+      assert(type(config.terminal.tabs.mouse_enabled) == "boolean", "terminal.tabs.mouse_enabled must be a boolean")
+    end
+    if config.terminal.tabs.show_close_button ~= nil then
+      assert(
+        type(config.terminal.tabs.show_close_button) == "boolean",
+        "terminal.tabs.show_close_button must be a boolean"
+      )
+    end
+    if config.terminal.tabs.show_new_button ~= nil then
+      assert(type(config.terminal.tabs.show_new_button) == "boolean", "terminal.tabs.show_new_button must be a boolean")
+    end
+    if config.terminal.tabs.separator ~= nil then
+      assert(type(config.terminal.tabs.separator) == "string", "terminal.tabs.separator must be a string")
+    end
+    if config.terminal.tabs.active_indicator ~= nil then
+      assert(type(config.terminal.tabs.active_indicator) == "string", "terminal.tabs.active_indicator must be a string")
+    end
+    if config.terminal.tabs.keymaps then
+      assert(type(config.terminal.tabs.keymaps) == "table", "terminal.tabs.keymaps must be a table")
+    end
+  end
+
+  -- Validate tui_keymaps if present (D2: master switch for #164's scroll/mouse remaps)
+  assert(
+    config.terminal.tui_keymaps == nil or type(config.terminal.tui_keymaps) == "boolean",
+    "terminal.tui_keymaps must be a boolean"
+  )
+
+  -- Validate per_tab_sessions if present (D7: opt-in per-tabpage session isolation)
+  assert(
+    config.terminal.per_tab_sessions == nil or type(config.terminal.per_tab_sessions) == "boolean",
+    "terminal.per_tab_sessions must be a boolean"
+  )
+
+  -- Validate cleanup_strategy if present
+  if config.terminal.cleanup_strategy ~= nil then
+    local valid_strategies = { "pkill_children", "jobstop_only", "aggressive", "none" }
+    local is_valid_strategy = false
+    for _, strategy in ipairs(valid_strategies) do
+      if config.terminal.cleanup_strategy == strategy then
+        is_valid_strategy = true
+        break
+      end
+    end
+    assert(is_valid_strategy, "terminal.cleanup_strategy must be one of: " .. table.concat(valid_strategies, ", "))
+  end
+
   local valid_log_levels = { "trace", "debug", "info", "warn", "error" }
   local is_valid_log_level = false
   for _, level in ipairs(valid_log_levels) do
@@ -104,6 +205,27 @@ function M.validate(config)
   assert(is_valid_log_level, "log_level must be one of: " .. table.concat(valid_log_levels, ", "))
 
   assert(type(config.track_selection) == "boolean", "track_selection must be a boolean")
+  assert(
+    config.terminal_filter_pattern == nil
+      or config.terminal_filter_pattern == false
+      or (type(config.terminal_filter_pattern) == "string" and pcall(string.match, "", config.terminal_filter_pattern)),
+    "terminal_filter_pattern must be a valid Lua pattern string or false"
+  )
+  if config.ide_name ~= nil then
+    assert(type(config.ide_name) == "table", "ide_name must be a table")
+    assert(
+      config.ide_name.override == nil or type(config.ide_name.override) == "string",
+      "ide_name.override must be a string"
+    )
+    assert(
+      config.ide_name.context == nil or type(config.ide_name.context) == "boolean",
+      "ide_name.context must be a boolean"
+    )
+    assert(
+      config.ide_name.tmux_include_pane == nil or type(config.ide_name.tmux_include_pane) == "boolean",
+      "ide_name.tmux_include_pane must be a boolean"
+    )
+  end
   -- Allow absence in direct validate() calls; apply() supplies default
   if config.focus_after_send ~= nil then
     assert(type(config.focus_after_send) == "boolean", "focus_after_send must be a boolean")

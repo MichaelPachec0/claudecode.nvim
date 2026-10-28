@@ -11,6 +11,7 @@ describe("claudecode.terminal.snacks command handling", function()
   local spy
   local captured
   local mock_snacks
+  local saved_modules
 
   local function make_term_instance()
     return {
@@ -22,7 +23,11 @@ describe("claudecode.terminal.snacks command handling", function()
       win_valid = function()
         return false
       end,
-      on = function() end,
+      on = function(_, event, fn)
+        captured.handlers = captured.handlers or {}
+        captured.handlers[event] = captured.handlers[event] or {}
+        table.insert(captured.handlers[event], fn)
+      end,
       toggle = function() end,
       focus = function() end,
       close = function() end,
@@ -34,6 +39,15 @@ describe("claudecode.terminal.snacks command handling", function()
     spy = require("luassert.spy")
 
     _G.vim = {
+      -- Mock additions for the session-aware provider (buffer flag, pid retry,
+      -- BufUnload hook, tabpage scoping).
+      b = setmetatable({}, {
+        __index = function(t, buf)
+          rawset(t, buf, {})
+          return rawget(t, buf)
+        end,
+      }),
+      defer_fn = function() end,
       log = { levels = { ERROR = 3, WARN = 2, INFO = 1, DEBUG = 0 } },
       notify = spy.new(function() end),
       inspect = function(v)
@@ -43,6 +57,12 @@ describe("claudecode.terminal.snacks command handling", function()
         fn()
       end,
       cmd = function() end,
+      bo = setmetatable({}, {
+        __index = function(t, buf)
+          rawset(t, buf, {})
+          return rawget(t, buf)
+        end,
+      }),
       split = function(str, sep, _opts)
         local result = {}
         local start = 1
@@ -69,6 +89,17 @@ describe("claudecode.terminal.snacks command handling", function()
         return res
       end,
       api = {
+        -- Mock additions for the session-aware provider.
+        nvim_create_autocmd = function() end,
+        nvim_buf_get_var = function()
+          error("no terminal_job_id in mock")
+        end,
+        nvim_win_get_tabpage = function()
+          return 1
+        end,
+        nvim_get_current_tabpage = function()
+          return 1
+        end,
         nvim_buf_is_valid = function()
           return true
         end,
@@ -100,6 +131,29 @@ describe("claudecode.terminal.snacks command handling", function()
     }
 
     package.loaded["snacks"] = mock_snacks
+
+    -- Multi-session collaborators (mock additions for the session-aware
+    -- provider): the terminal module's session hooks and the OSC handler.
+    saved_modules = {
+      ["claudecode.terminal"] = package.loaded["claudecode.terminal"],
+      ["claudecode.terminal.osc_handler"] = package.loaded["claudecode.terminal.osc_handler"],
+    }
+    package.loaded["claudecode.terminal"] = {
+      defaults = { cleanup_strategy = "jobstop_only" },
+      register_buffer_session = function() end,
+      update_session_terminal_info = function() end,
+      setup_terminal_keymaps = function() end,
+      setup_scroll_keymaps = function() end,
+      track_terminal_pid = function() end,
+      untrack_terminal_pid = function(job_id)
+        captured.untracked = captured.untracked or {}
+        table.insert(captured.untracked, job_id)
+      end,
+    }
+    package.loaded["claudecode.terminal.osc_handler"] = {
+      setup_buffer_handler = function() end,
+      cleanup_buffer_handler = function() end,
+    }
     package.loaded["claudecode.logger"] = {
       debug = spy.new(function() end),
       info = spy.new(function() end),
@@ -116,6 +170,9 @@ describe("claudecode.terminal.snacks command handling", function()
 
   after_each(function()
     _G.vim = original_vim
+    for name, mod in pairs(saved_modules) do
+      package.loaded[name] = mod
+    end
     package.loaded["snacks"] = nil
     package.loaded["claudecode.utils"] = nil
     package.loaded["claudecode.logger"] = nil
@@ -124,6 +181,36 @@ describe("claudecode.terminal.snacks command handling", function()
 
   local function base_config()
     return { cwd = "/work", split_side = "right", split_width_percentage = 0.30, auto_close = false }
+  end
+
+  -- C2: an exited job's PID must be untracked immediately, whatever auto_close
+  -- is set to; a stale PID can be reused by an unrelated process.
+  for _, auto_close in ipairs({ false, true }) do
+    for _, event in ipairs({ "TermClose", "BufWipeout" }) do
+      it("untracks the job PID on " .. event .. " (auto_close = " .. tostring(auto_close) .. ")", function()
+        vim.api.nvim_buf_get_var = function(_, name)
+          if name == "terminal_job_id" then
+            return 55
+          end
+          error("no var")
+        end
+        vim.v = { event = { status = 0 } }
+        vim.cmd = setmetatable({}, {
+          __call = function() end,
+          __index = function()
+            return function() end
+          end,
+        })
+        local cfg = base_config()
+        cfg.auto_close = auto_close
+        snacks_provider.open_session("s1", "claude", {}, cfg, true)
+        assert.is_truthy(captured.handlers and captured.handlers[event], "no " .. event .. " handler registered")
+        for _, fn in ipairs(captured.handlers[event]) do
+          fn()
+        end
+        assert.are.same({ 55 }, { (captured.untracked or {})[1] })
+      end)
+    end
   end
 
   it("passes a bracketed model alias to Snacks as an argv list, not a shell string", function()
@@ -154,5 +241,151 @@ describe("claudecode.terminal.snacks command handling", function()
 
     assert.is_table(captured.cmd)
     assert.are.same({ home .. "/.claude/local/claude" }, captured.cmd)
+  end)
+end)
+
+-- Task 9 fix round 1: register_new_instance used to only call
+-- setup_terminal_keymaps (smart ESC + legacy exit key + split navigation) when
+-- config.esc_timeout > 0, so a Snacks user who set only split_navigation =
+-- true (esc_timeout at its Task 9 default of 0) got no split-nav keymaps at
+-- all, unlike the native provider which calls setup_terminal_keymaps
+-- unconditionally. These tests drive the real claudecode.terminal (not the
+-- fake stub the describe above uses) so setup_terminal_keymaps' own gating
+-- logic installs (or withholds) real vim.keymap.set calls on a Snacks buffer.
+-- This is a sibling of the describe above (not nested in it): that describe's
+-- before_each replaces package.loaded["claudecode.terminal"] with a
+-- no-op-only fake, which would hide the very call-site bug being fixed here.
+describe("claudecode.terminal.snacks keymap wiring (Task 9 fix round 1)", function()
+  local snacks_provider
+  local original_vim
+  local saved_modules
+
+  local function make_term_instance()
+    return {
+      buf = 1,
+      win = nil,
+      buf_valid = function()
+        return true
+      end,
+      win_valid = function()
+        return false
+      end,
+      on = function() end,
+      toggle = function() end,
+      focus = function() end,
+      close = function() end,
+    }
+  end
+
+  before_each(function()
+    original_vim = vim
+    -- Unlike the describe above, use the shared, fuller vim mock: real
+    -- setup_terminal_keymaps/setup_scroll_keymaps need vim.keymap.set,
+    -- vim.api.nvim_create_autocmd, and friends, which that describe's
+    -- hand-rolled minimal mock does not provide.
+    _G.vim = require("tests.mocks.vim")
+    if _G.vim._mock and _G.vim._mock.reset then
+      _G.vim._mock.reset()
+    end
+    -- The shared mock has no vim.bo; snacks.lua's create_terminal_buffer sets
+    -- vim.bo[buf].filetype directly.
+    vim.bo = setmetatable({}, {
+      __index = function(t, buf)
+        rawset(t, buf, {})
+        return rawget(t, buf)
+      end,
+    })
+    -- Register the mock terminal instance's buffer (id 1, see
+    -- make_term_instance below) as a real buffer so nvim_buf_is_valid(1) is
+    -- true: setup_terminal_keymaps/setup_scroll_keymaps are no-ops on an
+    -- invalid buffer, which would mask the very thing under test here.
+    vim._buffers[1] = { name = "", lines = {}, options = {} }
+
+    package.loaded["snacks"] = {
+      terminal = {
+        open = function()
+          return make_term_instance()
+        end,
+      },
+    }
+
+    saved_modules = {
+      ["claudecode.server.init"] = package.loaded["claudecode.server.init"],
+      ["claudecode.logger"] = package.loaded["claudecode.logger"],
+      ["claudecode.terminal.osc_handler"] = package.loaded["claudecode.terminal.osc_handler"],
+      ["claudecode.terminal"] = package.loaded["claudecode.terminal"],
+      ["claudecode.terminal.snacks"] = package.loaded["claudecode.terminal.snacks"],
+    }
+
+    -- Keep claudecode.terminal's own module graph light: it requires
+    -- claudecode.server.init at load time, which otherwise pulls in the full
+    -- server/tools graph. claudecode.session and claudecode.tab_registry are
+    -- left real (pure Lua, no heavy deps) since register_new_instance's
+    -- session bookkeeping calls need to succeed.
+    package.loaded["claudecode.server.init"] = { state = {} }
+    package.loaded["claudecode.logger"] = {
+      debug = function() end,
+      info = function() end,
+      warn = function() end,
+      error = function() end,
+    }
+    package.loaded["claudecode.terminal.osc_handler"] = {
+      setup_buffer_handler = function() end,
+      cleanup_buffer_handler = function() end,
+    }
+
+    package.loaded["claudecode.terminal"] = nil
+    package.loaded["claudecode.terminal.snacks"] = nil
+    require("claudecode.terminal")
+    snacks_provider = require("claudecode.terminal.snacks")
+  end)
+
+  after_each(function()
+    for name, mod in pairs(saved_modules) do
+      package.loaded[name] = mod
+    end
+    package.loaded["snacks"] = nil
+    _G.vim = original_vim
+  end)
+
+  ---@param overrides table?
+  local function base_config(overrides)
+    local cfg = {
+      cwd = "/work",
+      split_side = "right",
+      split_width_percentage = 0.30,
+      auto_close = false,
+      keymaps = { exit_terminal = false },
+      esc_timeout = 0,
+      split_navigation = false,
+      tui_keymaps = false,
+      scroll_up_enabled = false,
+    }
+    for k, v in pairs(overrides or {}) do
+      cfg[k] = v
+    end
+    return cfg
+  end
+
+  it("installs no ESC or split-navigation buffer maps with default config", function()
+    local set = spy.on(vim.keymap, "set")
+    snacks_provider.open("sh", {}, base_config(), true)
+    assert.spy(set).was_not_called()
+    set:revert()
+  end)
+
+  it("installs split-navigation maps when split_navigation = true alone (esc_timeout stays 0)", function()
+    local set = spy.on(vim.keymap, "set")
+    snacks_provider.open("sh", {}, base_config({ split_navigation = true }), true)
+    assert.spy(set).was_called_with("t", "<C-h>", match._, match._)
+    assert.spy(set).was_called_with("n", "<C-h>", match._, match._)
+    set:revert()
+  end)
+
+  it("installs the smart ESC map when esc_timeout = 200", function()
+    local set = spy.on(vim.keymap, "set")
+    snacks_provider.open("sh", {}, base_config({ esc_timeout = 200 }), true)
+    assert.spy(set).was_called_with("t", "<Esc>", match._, match._)
+    set:revert()
   end)
 end)

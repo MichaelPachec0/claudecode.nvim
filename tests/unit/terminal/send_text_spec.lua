@@ -227,4 +227,135 @@ describe("terminal.send_to_terminal (#197)", function()
     assert.is_false(ok)
     assert.are.equal(0, open_calls)
   end)
+
+  describe("multi-session routing (Task 8)", function()
+    local session_manager
+    local tab_registry
+    local provider
+
+    -- A session-aware provider: get_active_bufnr() models a provider's single
+    -- legacy pointer (as a real provider would report it before any per-session
+    -- fix), while get_session_bufnr(session_id) models the real per-session
+    -- lookup that native.lua/snacks.lua expose.
+    local function multi_session_provider()
+      local session_bufnrs = {}
+      local legacy_active_bufnr
+      return {
+        setup = function() end,
+        open = function()
+          open_calls = open_calls + 1
+        end,
+        close = function() end,
+        simple_toggle = function() end,
+        focus_toggle = function() end,
+        get_active_bufnr = function()
+          return legacy_active_bufnr
+        end,
+        get_session_bufnr = function(session_id)
+          return session_bufnrs[session_id]
+        end,
+        is_available = function()
+          return true
+        end,
+        -- Test helpers (not part of the provider contract).
+        _set_session_bufnr = function(session_id, bufnr)
+          session_bufnrs[session_id] = bufnr
+        end,
+        _set_legacy_active_bufnr = function(bufnr)
+          legacy_active_bufnr = bufnr
+        end,
+      }
+    end
+
+    local function register(bufnr, channel)
+      vim._buffers[bufnr] = { lines = {}, options = {}, b_vars = { terminal_job_id = channel } }
+      vim.bo[bufnr] = { channel = channel }
+    end
+
+    before_each(function()
+      session_manager = require("claudecode.session")
+      tab_registry = require("claudecode.tab_registry")
+      session_manager.reset()
+      tab_registry.reset()
+      provider = multi_session_provider()
+      open_calls = 0
+      terminal.setup({ provider = provider }, nil, {})
+    end)
+
+    after_each(function()
+      session_manager.reset()
+      tab_registry.reset()
+    end)
+
+    it("sends to the active session's channel, not a stale legacy pointer", function()
+      local sid1 = session_manager.create_session()
+      local sid2 = session_manager.create_session()
+      register(101, 11)
+      register(102, 22)
+      provider._set_session_bufnr(sid1, 101)
+      provider._set_session_bufnr(sid2, 102)
+      -- The provider's plain get_active_bufnr() still names session 1 -- e.g.
+      -- it was never told about the switch. If send_to_terminal ever falls
+      -- back to it while an active session id is available, text lands in
+      -- the wrong pane.
+      provider._set_legacy_active_bufnr(101)
+
+      session_manager.set_active_session(sid2)
+
+      local ok = terminal.send_to_terminal("hi", { submit = true })
+      assert.is_true(ok)
+      assert.are.equal(1, #chansend_calls)
+      assert.are.equal(22, chansend_calls[1].chan)
+    end)
+
+    it("switching to session 2 then back to session 1 sends to session 1 again", function()
+      local sid1 = session_manager.create_session()
+      local sid2 = session_manager.create_session()
+      register(201, 1)
+      register(202, 2)
+      provider._set_session_bufnr(sid1, 201)
+      provider._set_session_bufnr(sid2, 202)
+
+      terminal.switch_to_session(sid2)
+      terminal.switch_to_session(sid1)
+
+      local ok = terminal.send_to_terminal("hi", { submit = false })
+      assert.is_true(ok)
+      assert.are.equal(1, #chansend_calls)
+      assert.are.equal(1, chansend_calls[1].chan)
+    end)
+
+    it("routes to the current tab's active session, not another tab's (per_tab_sessions = true)", function()
+      tab_registry.set_per_tab_enabled(true)
+      local original_get_current_tabpage = vim.api.nvim_get_current_tabpage
+      local current_tab = 1
+      vim.api.nvim_get_current_tabpage = function()
+        return current_tab
+      end
+
+      local sid_a = session_manager.create_session()
+      local sid_b = session_manager.create_session()
+      register(301, 31)
+      register(302, 32)
+      provider._set_session_bufnr(sid_a, 301)
+      provider._set_session_bufnr(sid_b, 302)
+
+      current_tab = 1
+      tab_registry.bind(1, sid_a)
+      current_tab = 2
+      tab_registry.bind(2, sid_b)
+
+      current_tab = 1
+      local ok = terminal.send_to_terminal("hi", { submit = false })
+      assert.is_true(ok)
+      assert.are.equal(31, chansend_calls[1].chan)
+
+      current_tab = 2
+      ok = terminal.send_to_terminal("hi", { submit = false })
+      assert.is_true(ok)
+      assert.are.equal(32, chansend_calls[2].chan)
+
+      vim.api.nvim_get_current_tabpage = original_get_current_tabpage
+    end)
+  end)
 end)

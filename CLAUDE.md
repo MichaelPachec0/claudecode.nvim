@@ -132,10 +132,18 @@ opts = {
 }
 ```
 
+**Multi-Session Architecture**: Multiple Claude Code sessions can run at once, each tracked as an independent session in `session.lua` (its own terminal buffer/window/job, WebSocket client binding, and selection state). @ mentions are NOT routed per session: `init.lua` keeps one shared pending-mention queue and broadcasts `at_mentioned` to every connected client (`session.queue_mention`/`flush_mention_queue` exist but are unused). `terminal.per_tab_sessions` (default `false`) decides how sessions relate to tabpages. With `false` (upstream behavior) nothing is bound to a tab: every tabpage resolves the global active session and shows it in that tab, so a second tabpage never spawns a second Claude; `:ClaudeCodeNew` still adds sessions and listing/switching sees all of them. With `true`, `tab_registry.lua` binds sessions to the Neovim tabpage that created them and records which one is active per tab, so `:ClaudeCodeSwitch`/`:ClaudeCodeCloseSession` and the tab-scoped commands only ever see the sessions that belong to the current tab; the `TabClosed` handler in `init.lua` re-homes a closed tab's sessions into the tabpage the user lands in (`tab_registry.rehome_invalid_tabs`), so a tab close never kills or orphans Claude. When a session's process exits, its replacement is picked only among sessions with their own live terminal (per-tab: only the owner tab's). `terminal/window_manager.lua` owns the single physical terminal window per tab and swaps session buffers into it, pinning the window (`winfixwidth`/`winfixheight`, and `winfixbuf` on Neovim >= 0.10) so other plugins cannot resize it or swap its buffer out from under it; the optional `terminal/tabbar.lua` renders a clickable tab strip on top of that window for switching sessions, and `terminal/osc_handler.lua` watches each session's terminal title to give it a display name. `terminal/process_cleanup.lua` is the single choke point every provider calls through to terminate a session's process tree on close or exit, per the configured `terminal.cleanup_strategy`. `terminal.cleanup_all` (VimLeavePre) only signals tracked jobs that are still running (providers untrack a job's PID the moment it exits) and only scans buffers flagged `b:claudecode_terminal = true`, so a user's own `:terminal` and reused PIDs are never signaled.
+
 ### Key File Locations
 
 - `lua/claudecode/init.lua` - Main entry point and setup
 - `lua/claudecode/config.lua` - Configuration management
+- `lua/claudecode/session.lua` - Session manager: per-session state (terminal buffer/window/job, WebSocket client, selection, mention queue) for multi-session terminals
+- `lua/claudecode/tab_registry.lua` - With `terminal.per_tab_sessions = true`, binds each Neovim tabpage to the session(s) it owns and tracks the tab's active session (empty and unused with the shared default)
+- `lua/claudecode/terminal/window_manager.lua` - Owns the single managed terminal window per tab and displays whichever session buffer is active
+- `lua/claudecode/terminal/tabbar.lua` - Per-tab clickable tab bar for switching between sessions
+- `lua/claudecode/terminal/osc_handler.lua` - Watches terminal title changes to name sessions from the Claude CLI's own title
+- `lua/claudecode/terminal/process_cleanup.lua` - Terminates Claude terminal jobs and their child processes per `terminal.cleanup_strategy`
 - `plugin/claudecode.lua` - Plugin loader with version checks
 - `tests/` - Comprehensive test suite with unit, component, and integration tests
 
@@ -144,6 +152,9 @@ opts = {
 The plugin emits `User` autocmds (not config fields) that integrations can hook:
 
 - **`ClaudeCodeSendComplete`** - Fired in `M.send_at_mention` (init.lua) once per file, synchronously, when a send is accepted on the connected branch (acceptance-time, not delivery; not fired on the queued/disconnected path). `data = { file_path, start_line, end_line, context }` — `file_path` is the formatted path Claude received, lines are 0-indexed and may be nil. Primary use: focus an external Claude session (`provider = "none"`/`"external"`) where `focus_after_send` is inert. Emitted via the guarded, pcall-wrapped `fire_send_complete` helper (no-op when `vim.api.nvim_exec_autocmds` is absent, e.g. minimal test stubs). See `lua/claudecode/types.lua` `ClaudeCodeSendCompleteData` and README "Events".
+
+- **`ClaudeCodeConnected` / `ClaudeCodeDisconnected`** - Scheduled from `server/init.lua`. `on_connect` runs only after the authenticated WebSocket handshake (`client.on_open`, set in `server/tcp.lua`), never at TCP accept, so an unauthenticated socket neither binds a session nor fires these. `data = { client_id, session_id }` (+ `code`, `reason` on disconnect).
+- **`ClaudeCodeTerminalOpened` / `ClaudeCodeTerminalHidden`** - Fired by `terminal.lua`'s public operations (wrapped by `with_visibility_events`, outermost call only) when the current tab's Claude terminal goes hidden -> shown or back. `data = { session_id }`. Manual `:q` on the window does not fire.
 
 ## MCP Protocol Compliance
 
@@ -298,7 +309,7 @@ require("claudecode").setup({
 The `diff_opts` configuration allows you to customize diff behavior:
 
 - `layout` ("vertical"|"horizontal", default: `"vertical"`) - Whether the diff panes open in a vertical or horizontal split.
-- `keep_terminal_focus` (boolean, default: `false`) - When enabled, keeps focus in the Claude Code terminal when a diff opens instead of moving focus to the diff buffer. This allows you to continue using terminal keybindings like `<CR>` for accepting/rejecting diffs without accidentally triggering other mappings.
+- `keep_terminal_focus` (boolean, default: `false`) - When enabled, keeps focus in the Claude Code terminal when a diff opens instead of moving focus to the diff buffer. This allows you to continue using terminal keybindings like `<CR>` for accepting/rejecting diffs without accidentally triggering other mappings. Also applies when a same-tab diff is cleaned up (accepted via `:w` or rejected): focus returns to the Claude terminal instead of wherever Neovim's default window selection would otherwise land.
 - `open_in_new_tab` (boolean, default: `false`) - Open diffs in a new tab instead of the current tab.
 - `hide_terminal_in_new_tab` (boolean, default: `false`) - When opening diffs in a new tab, do not show the Claude terminal split in that new tab. The terminal remains in the original tab, giving maximum screen estate for reviewing the diff.
 - `on_new_file_reject` ("keep_empty"|"close_window", default: `"keep_empty"`) - Behavior when rejecting a diff for a new file (where the old file did not exist).
@@ -351,7 +362,7 @@ Log levels for authentication events:
 
 ### Security Considerations
 
-- WebSocket server only accepts local connections (127.0.0.1) for security
+- WebSocket server listens on loopback (127.0.0.1) by default. `bind_address` can move it to another IP literal (containers); `server/tcp.lua` logs a WARN at startup whenever that address is not loopback (`tcp.is_loopback`), because off loopback only the unencrypted auth token protects it
 - Authentication tokens are 128-bit tokens (32-char lowercase hex) from the OS CSPRNG
 - Lock files created at `~/.claude/ide/[port].lock` for Claude CLI discovery
 - All authentication events are logged for security auditing

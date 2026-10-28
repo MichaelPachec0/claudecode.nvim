@@ -1,10 +1,303 @@
---- Module to manage a dedicated vertical split terminal for Claude Code.
+--- Module to manage dedicated vertical split terminals for Claude Code.
 --- Supports Snacks.nvim or a native Neovim terminal fallback.
+--- Now supports multiple concurrent terminal sessions.
 --- @module 'claudecode.terminal'
 
 local M = {}
 
 local claudecode_server_module = require("claudecode.server.init")
+local osc_handler = require("claudecode.terminal.osc_handler")
+local session_manager = require("claudecode.session")
+local tab_registry = require("claudecode.tab_registry")
+
+-- Use global to survive module reloads (Fix 3: Plugin Reload Protection)
+---@type table<number, number> Map of job_id -> unix_pid
+_G._claudecode_tracked_pids = _G._claudecode_tracked_pids or {}
+local tracked_pids = _G._claudecode_tracked_pids
+
+-- Buffer to session mapping for cleanup on BufUnload (Fix 1: Zombie Sessions)
+---@type table<number, string> Map of bufnr -> session_id
+_G._claudecode_buffer_to_session = _G._claudecode_buffer_to_session or {}
+local buffer_to_session = _G._claudecode_buffer_to_session
+
+---PID of `job_id` if that job is still running, else nil. Neovim raises E900
+---from jobpid() once a job has exited, so this doubles as a liveness check.
+---@param job_id number
+---@return number|nil pid
+local function live_job_pid(job_id)
+  local ok, pid = pcall(vim.fn.jobpid, job_id)
+  if ok and type(pid) == "number" and pid > 0 then
+    return pid
+  end
+  return nil
+end
+
+---Drop tracked PIDs whose jobs no longer exist (Fix 3: Plugin Reload
+---Protection). Called from M.setup() (not at module load: this module must
+---have no side effects at require time). Stale entries are only forgotten,
+---never signaled: once a job has exited its PID may already belong to an
+---unrelated process, so signaling it could kill that process (group).
+local function prune_stale_tracked_pids()
+  for job_id, pid in pairs(tracked_pids) do
+    local live = live_job_pid(job_id)
+    if not live or live ~= pid then
+      tracked_pids[job_id] = nil
+    end
+  end
+end
+M._prune_stale_tracked_pids = prune_stale_tracked_pids
+
+---Track a terminal job's PID for cleanup on exit
+---@param job_id number The Neovim job ID
+function M.track_terminal_pid(job_id)
+  if not job_id then
+    return
+  end
+  local ok, pid = pcall(vim.fn.jobpid, job_id)
+  if ok and pid and pid > 0 then
+    tracked_pids[job_id] = pid
+  end
+end
+
+---Untrack a terminal job (called when terminal exits normally)
+---@param job_id number The Neovim job ID
+function M.untrack_terminal_pid(job_id)
+  if job_id then
+    tracked_pids[job_id] = nil
+  end
+end
+
+---Register a buffer-to-session mapping for cleanup on BufUnload (Fix 1)
+---@param bufnr number The buffer number
+---@param session_id string The session ID
+function M.register_buffer_session(bufnr, session_id)
+  if bufnr and session_id then
+    buffer_to_session[bufnr] = session_id
+  end
+end
+
+---Unregister a buffer-to-session mapping (called when session is properly destroyed)
+---@param bufnr number The buffer number
+function M.unregister_buffer_session(bufnr)
+  if bufnr then
+    buffer_to_session[bufnr] = nil
+  end
+end
+
+---True when terminal.per_tab_sessions is on: each tabpage owns its own
+---sessions. False (the default) keeps upstream's single shared session set, so
+---every tabpage resolves the global active session instead of spawning its own.
+---@return boolean
+local function per_tab()
+  return tab_registry.is_per_tab_enabled()
+end
+
+---Bind a session to the current Neovim tabpage so subsequent open/toggle/picker
+---calls in that tab route to it. Idempotent. A no-op unless per_tab_sessions
+---is on: shared sessions are never tied to a tab.
+---@param session_id string
+function M._bind_to_current_tab(session_id)
+  if not session_id or not per_tab() then
+    return
+  end
+  local ok, tab = pcall(vim.api.nvim_get_current_tabpage)
+  if ok and tab then
+    tab_registry.bind(tab, session_id)
+  end
+end
+
+---Resolve the session the current tabpage should show, including a check that
+---the session record actually still exists. With per_tab_sessions on this is
+---the session bound to the current tab; otherwise it is the global active
+---session, whichever tab it was opened from.
+---@return string|nil session_id, ClaudeCodeSession|nil session
+local function current_tab_session()
+  local sid
+  if per_tab() then
+    local ok, tab = pcall(vim.api.nvim_get_current_tabpage)
+    if not ok or not tab then
+      return nil, nil
+    end
+    sid = tab_registry.session_for_tab(tab)
+  else
+    sid = session_manager.get_active_session_id()
+  end
+  if not sid then
+    return nil, nil
+  end
+  local sess = session_manager.get_session(sid)
+  if not sess then
+    return nil, nil
+  end
+  return sid, sess
+end
+
+---True when the current tab's session has a terminal buffer that is still alive.
+---@return boolean
+local function current_tab_has_live_terminal()
+  local _, sess = current_tab_session()
+  return sess ~= nil and sess.terminal_bufnr ~= nil and vim.api.nvim_buf_is_valid(sess.terminal_bufnr)
+end
+
+---Explicit Claude arguments (`:ClaudeCode --resume`, `:ClaudeCodeAgents`) only
+---reach the CLI when a terminal is spawned, so reusing the tab's live session
+---would silently drop them. When they differ from the arguments that session
+---was launched with, start a separate session with them instead; the existing
+---one keeps running and stays reachable via :ClaudeCodeSwitch. Matching
+---arguments fall through to the normal show/hide toggle.
+---@param provider table
+---@param opts_override table|nil
+---@param cmd_args string|nil
+---@return boolean started True when a new session was started
+local function open_session_for_new_args(provider, opts_override, cmd_args)
+  if not provider.open_session or not cmd_args or cmd_args == "" then
+    return false
+  end
+  if not current_tab_has_live_terminal() then
+    return false
+  end
+  local _, sess = current_tab_session()
+  if sess and sess.cmd_args == cmd_args then
+    return false
+  end
+  M.open_new_session(opts_override, cmd_args)
+  return true
+end
+
+---Session ids the current tabpage may show, active one first: the tab's own
+---sessions with per_tab_sessions on, otherwise every session.
+---@param tab integer
+---@return string[]
+local function candidate_sessions_for_tab(tab)
+  local ids = {}
+  local seen = {}
+  local function add(sid)
+    if sid and not seen[sid] then
+      seen[sid] = true
+      table.insert(ids, sid)
+    end
+  end
+  if per_tab() then
+    add(tab_registry.session_for_tab(tab))
+    for _, sid in ipairs(tab_registry.sessions_for_tab(tab)) do
+      add(sid)
+    end
+  else
+    add(session_manager.get_active_session_id())
+    for _, s in ipairs(session_manager.list_sessions()) do
+      add(s.id)
+    end
+  end
+  return ids
+end
+
+---True when `win` lives in tabpage `tab`.
+---@param win number
+---@param tab integer
+---@return boolean
+local function win_in_tab(win, tab)
+  local ok, win_tab = pcall(vim.api.nvim_win_get_tabpage, win)
+  return ok and win_tab == tab
+end
+
+---For a provider that owns its session windows (exposes get_session_window,
+---e.g. Snacks park/unpark), find the session that is actually on screen in the
+---current tabpage. Every candidate session is checked, not only the active
+---pointer: that pointer can name a parked session (e.g. after a session close
+---promoted another one), and trusting it would swap sessions instead of
+---hiding the visible one. A window in another tabpage does not count: with
+---shared sessions the same session may be on screen in a different tab.
+---@param provider table The terminal provider module
+---@return string|nil session_id, number|nil winid
+local function visible_tab_session(provider)
+  if not provider.get_session_window then
+    return nil, nil
+  end
+  local ok, tab = pcall(vim.api.nvim_get_current_tabpage)
+  if not ok or not tab then
+    return nil, nil
+  end
+  for _, sid in ipairs(candidate_sessions_for_tab(tab)) do
+    local win = provider.get_session_window(sid)
+    if win and win_in_tab(win, tab) then
+      return sid, win
+    end
+  end
+  return nil, nil
+end
+
+---Wire up the auxiliary state for a freshly-spawned session terminal: tab bind,
+---buffer→session map, terminal_info on the session, OSC title watcher, provider
+---registration. Returns the session id.
+---@param session_id string
+---@param bufnr number
+---@param provider table The terminal provider module
+---@param cmd_args string|nil Claude CLI arguments the session was launched with
+---@param cwd string|nil Working directory the session's Claude process started in
+---@return string session_id
+local function finalize_session_terminal(session_id, bufnr, provider, cmd_args, cwd)
+  local session = session_manager.get_session(session_id)
+  if session then
+    session.cmd_args = cmd_args
+    session.cwd = cwd
+  end
+  if bufnr then
+    session_manager.update_terminal_info(session_id, { bufnr = bufnr })
+    if provider.register_terminal_for_session then
+      provider.register_terminal_for_session(session_id, bufnr)
+    end
+    M.register_buffer_session(bufnr, session_id)
+    osc_handler.setup_buffer_handler(bufnr, function(title)
+      if title and title ~= "" then
+        session_manager.update_session_name(session_id, title)
+      end
+    end)
+  end
+  return session_id
+end
+
+---Ensure the current tab has a session to show, creating (and, with
+---per_tab_sessions on, binding) one if not. With shared sessions (the default)
+---this reuses the global active session from any tab, so a second tabpage
+---never spawns a second Claude. Returns the session id and whether it was
+---newly created.
+---@return string session_id, boolean newly_created
+local function ensure_current_tab_session()
+  local sid = current_tab_session()
+  if sid then
+    return sid, false
+  end
+  local new_sid = session_manager.create_session()
+  session_manager.set_active_session(new_sid)
+  M._bind_to_current_tab(new_sid)
+  return new_sid, true
+end
+
+---Installs the global BufUnload handler that cleans up orphaned sessions
+---(Fix 1: Zombie Sessions). This catches :bd! and other direct buffer deletions
+---that bypass close_session(). Called from M.setup() rather than at module load
+---so that require("claudecode.terminal") has no side effects. The augroup is
+---cleared on each call, so repeated setup() calls do not stack handlers.
+local function setup_buffer_cleanup_autocmd()
+  if not (vim.api and vim.api.nvim_create_autocmd and vim.api.nvim_create_augroup) then
+    return
+  end
+  vim.api.nvim_create_autocmd("BufUnload", {
+    group = vim.api.nvim_create_augroup("ClaudeCodeBufferCleanup", { clear = true }),
+    callback = function(ev)
+      local session_id = buffer_to_session[ev.buf]
+      if session_id then
+        buffer_to_session[ev.buf] = nil
+        -- Destroy orphaned session if it still exists
+        if session_manager.get_session(session_id) then
+          local logger = require("claudecode.logger")
+          logger.debug("terminal", "Auto-destroying orphaned session on BufUnload: " .. session_id)
+          session_manager.destroy_session(session_id)
+        end
+      end
+    end,
+  })
+end
 
 ---@type ClaudeCodeTerminalConfig
 local defaults = {
@@ -26,9 +319,532 @@ local defaults = {
   cwd = nil, -- static cwd override
   git_repo_cwd = false, -- resolve to git root when spawning
   cwd_provider = nil, -- function(ctx) -> cwd string
+  -- Master switch for the TUI scroll/mouse remaps installed by setup_scroll_keymaps
+  -- (normal-mode j/k/<Up>, mouse wheel, <PageUp>/<PageDown>, <LeftDrag>). false (default):
+  -- none of those keymaps are installed, matching plain-terminal (upstream) behaviour.
+  -- true: install them; scroll_up_enabled below then selects which flavor.
+  tui_keymaps = false,
+  -- Scroll behaviour in terminal mode. Only consulted when tui_keymaps is true.
+  -- false (default): <ScrollWheelUp>/k/<Up> forward guarded scroll events to the Claude Code
+  --   TUI so it scrolls its own conversation.
+  -- true: <ScrollWheelUp> exits terminal mode so you can view Neovim's scrollback buffer.
+  --   <ScrollWheelDown> in normal mode auto-returns to terminal mode at the last line.
+  scroll_up_enabled = false,
+  -- Per-tab sessions: false (default) keeps one shared set of sessions across all
+  -- tabpages (upstream behavior; a second tab shows the same Claude). true gives
+  -- each tabpage its own sessions.
+  per_tab_sessions = false,
+  -- Split navigation: Ctrl+h/j/k/l to move between splits from terminal mode.
+  -- false (default): no split-navigation keymaps are installed (upstream behaviour).
+  split_navigation = false,
+  -- Terminal keymaps
+  keymaps = {
+    -- Triple-ESC to exit terminal mode. false (default): no ESC keymap is installed
+    -- (upstream behaviour; use Neovim's own <C-\><C-n> to leave terminal mode).
+    -- Set to a string (e.g. "<Esc><Esc>") to bind that as a direct exit keymap.
+    exit_terminal = false,
+  },
+  -- Smart ESC handling: timeout in ms to count up to three ESC presses before sending ESC to
+  -- terminal. 0 (default): disabled, no ESC interception (upstream behaviour). Set > 0 to
+  -- opt in to triple-ESC-to-exit handling.
+  esc_timeout = 0,
+  -- Process cleanup strategy when Neovim exits
+  -- "pkill_children" - Kill child processes first, then shell (recommended, fixes race condition)
+  -- "jobstop_only"   - Only use Neovim's jobstop (relies on shell forwarding SIGTERM)
+  -- "aggressive"     - Use SIGKILL for guaranteed termination (may leave state)
+  -- "none"           - Don't kill processes on exit (manual cleanup)
+  cleanup_strategy = "pkill_children",
+  -- Tab bar for session switching (optional)
+  tabs = {
+    enabled = false, -- Off by default
+    height = 1, -- Height of tab bar in lines
+    show_close_button = true, -- Show [x] close button on tabs
+    show_new_button = true, -- Show [+] button for new session
+    separator = " | ", -- Separator between tabs
+    active_indicator = "*", -- Indicator for active tab
+    mouse_enabled = false, -- Mouse clicks optional, off by default
+    keymaps = {
+      next_tab = "<A-Tab>", -- Switch to next session (Alt+Tab)
+      prev_tab = "<A-S-Tab>", -- Switch to previous session (Alt+Shift+Tab)
+      close_tab = "<A-w>", -- Close current tab (Alt+w)
+      new_tab = "<A-+>", -- Create new session (Alt++)
+    },
+  },
 }
 
 M.defaults = defaults
+
+-- ============================================================================
+-- Smart ESC handler for terminal mode
+-- ============================================================================
+
+-- State for tracking ESC key presses per buffer
+local esc_state = {}
+
+---Creates a smart ESC handler for a terminal buffer.
+---Counts ESC presses: 1x or 2x ESC (with timeout) forwards ESC bytes to the terminal,
+---allowing Claude Code to handle cancel (1x) and rewind (2x). Triple ESC exits terminal mode.
+---State shape (when non-nil): { count = 1|2, timer = uv_timer_or_nil }
+---Idle state is represented by esc_state[bufnr] == nil (no entry stored).
+---@param bufnr number The terminal buffer number
+---@param timeout_ms number Timeout in milliseconds to wait for next ESC
+---@return function handler The ESC key handler function
+function M.create_smart_esc_handler(bufnr, timeout_ms)
+  return function()
+    local state = esc_state[bufnr]
+    local count = state and state.count or 0
+
+    if count == 2 then
+      -- Third ESC within timeout - exit terminal mode
+      if state.timer then
+        state.timer:stop()
+        state.timer:close()
+      end
+      esc_state[bufnr] = nil
+      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<C-\\><C-n>", true, false, true), "n", false)
+    elseif count == 1 then
+      -- Second ESC within timeout - advance to count=2, restart timer with fresh timeout
+      state.count = 2
+      if state.timer then
+        state.timer:stop()
+        state.timer:start(
+          timeout_ms,
+          0,
+          vim.schedule_wrap(function()
+            -- Guard: only act if state hasn't advanced past count=2
+            if esc_state[bufnr] and esc_state[bufnr].count == 2 then
+              local s = esc_state[bufnr]
+              esc_state[bufnr] = nil
+              if s.timer then
+                s.timer:stop()
+                s.timer:close()
+              end
+              if vim.api.nvim_buf_is_valid(bufnr) then
+                local channel = vim.bo[bufnr].channel
+                if channel and channel > 0 then
+                  vim.fn.chansend(channel, "\027\027")
+                end
+              end
+            end
+          end)
+        )
+      end
+    else
+      -- First ESC - start timer
+      local timer = vim.uv.new_timer()
+      esc_state[bufnr] = { count = 1, timer = timer }
+      timer:start(
+        timeout_ms,
+        0,
+        vim.schedule_wrap(function()
+          -- Guard: only act if state is still at count=1
+          if esc_state[bufnr] and esc_state[bufnr].count == 1 then
+            local s = esc_state[bufnr]
+            esc_state[bufnr] = nil
+            if s.timer then
+              s.timer:stop()
+              s.timer:close()
+            end
+            if vim.api.nvim_buf_is_valid(bufnr) then
+              local channel = vim.bo[bufnr].channel
+              if channel and channel > 0 then
+                vim.fn.chansend(channel, "\027")
+              end
+            end
+          end
+        end)
+      )
+    end
+  end
+end
+
+---Sets up smart ESC handling for a terminal buffer.
+---If smart ESC is enabled (esc_timeout > 0), maps single ESC to smart handler.
+---Otherwise falls back to a direct keymap binding for the configured exit key.
+---@param bufnr number The terminal buffer number
+---@param config table The terminal configuration (with keymaps and esc_timeout)
+function M.setup_terminal_keymaps(bufnr, config)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+
+  local timeout = config.esc_timeout
+  local exit_key = config.keymaps and config.keymaps.exit_terminal
+
+  if timeout and timeout > 0 then
+    -- Smart ESC handling: intercept single ESC
+    local handler = M.create_smart_esc_handler(bufnr, timeout)
+    vim.keymap.set("t", "<Esc>", handler, {
+      buffer = bufnr,
+      desc = "Smart ESC: triple-tap to exit terminal mode, single/double sends ESC to Claude",
+    })
+  elseif exit_key then
+    -- Fallback: simple keymap (legacy behavior)
+    vim.keymap.set("t", exit_key, "<C-\\><C-n>", {
+      buffer = bufnr,
+      desc = "Exit terminal mode",
+    })
+  end
+
+  -- Split navigation: Ctrl+h/j/k/l to move between splits from terminal mode.
+  -- Opt-in: only an explicit true installs it (nil means off, like false).
+  if config.split_navigation == true then
+    local saved_mode = {} -- per-buffer saved mode
+
+    local directions = { h = "left", j = "below", k = "above", l = "right" }
+    for key, desc in pairs(directions) do
+      vim.keymap.set("t", "<C-" .. key .. ">", function()
+        saved_mode[bufnr] = "t"
+        vim.cmd("stopinsert")
+        vim.cmd("wincmd " .. key)
+      end, {
+        buffer = bufnr,
+        desc = "Move to " .. desc .. " split",
+      })
+      vim.keymap.set("n", "<C-" .. key .. ">", function()
+        saved_mode[bufnr] = "n"
+        vim.cmd("wincmd " .. key)
+      end, {
+        buffer = bufnr,
+        desc = "Move to " .. desc .. " split",
+      })
+    end
+
+    -- Restore mode when re-entering the Claude terminal buffer
+    vim.api.nvim_create_autocmd("BufEnter", {
+      buffer = bufnr,
+      callback = function()
+        local mode = saved_mode[bufnr]
+        if mode == "t" then
+          vim.cmd("startinsert")
+        end
+        -- "n" needs no action, it's the default
+      end,
+    })
+  end
+end
+
+---Setup scroll keymaps for a terminal buffer.
+---When scroll_up_enabled is true (default), <ScrollWheelUp> exits terminal mode so the user
+---can scroll the scrollback buffer. <ScrollWheelDown> in normal mode auto-returns to terminal
+---mode when the cursor reaches the last line. Set scroll_up_enabled = false to block mouse
+---scroll entirely (legacy behaviour).
+---@param bufnr number The terminal buffer number
+---@param config ClaudeCodeTerminalConfig Terminal configuration
+function M.setup_scroll_keymaps(bufnr, config)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+
+  -- Opt-in gate (D2): none of the remaps below are installed unless the user
+  -- explicitly turns on terminal.tui_keymaps. Default is upstream behavior:
+  -- Neovim forwards wheel/keyboard events to the terminal job untouched.
+  if not config.tui_keymaps then
+    return
+  end
+
+  -- Shared over-scroll guard for keyboard k/<Up> and mouse <ScrollWheelUp>.
+  -- Detection is purely visual: when Claude Code's TUI is at the top of its conversation,
+  -- further scroll-up events push content off the top and leave the bottom of the window
+  -- visually empty. We read the rendered screen content to detect that and stop forwarding.
+  local OVERSCROLL_EMPTY_ROWS = 5
+
+  ---True if a single screen row has only whitespace inside the given column range.
+  ---Iterates `vim.fn.screenchar` per cell — there is no whole-row screen API in Neovim.
+  ---@param row integer 1-indexed screen row
+  ---@param start_col integer 1-indexed inclusive
+  ---@param end_col integer 1-indexed inclusive
+  local function screen_row_is_empty(row, start_col, end_col)
+    for c = start_col, end_col do
+      local ch = vim.fn.screenchar(row, c)
+      -- screenchar returns -1 for invalid positions, 0 for unfilled cells; 32 is space.
+      if ch > 0 and ch ~= 32 then
+        return false
+      end
+    end
+    return true
+  end
+
+  ---True if the terminal window has at least OVERSCROLL_EMPTY_ROWS visually-empty rows
+  ---at its bottom edge (i.e. Claude Code's TUI has been scrolled past the conversation top).
+  ---Uses `win_screenpos` because it returns the CONTENT top-left for floating windows
+  ---(skipping any border row). `nvim_win_get_position` returns the border top-left, which
+  ---would put us off-by-one and inspect the bottom border row (border glyphs read as
+  ---"non-empty" and defeat the detection).
+  ---@param winid integer
+  local function tui_overscrolled(winid)
+    if not vim.api.nvim_win_is_valid(winid) then
+      return false
+    end
+    local screenpos = vim.fn.win_screenpos(winid)
+    if not screenpos or #screenpos < 2 or screenpos[1] == 0 then
+      return false
+    end
+    local content_top = screenpos[1]
+    local content_left = screenpos[2]
+    local width = vim.api.nvim_win_get_width(winid)
+    local height = vim.api.nvim_win_get_height(winid)
+    local start_col = content_left
+    local end_col = content_left + width - 1
+    local bottom_row = content_top + height - 1
+    for offset = 0, OVERSCROLL_EMPTY_ROWS - 1 do
+      local r = bottom_row - offset
+      if r < content_top then
+        break
+      end
+      if not screen_row_is_empty(r, start_col, end_col) then
+        return false
+      end
+    end
+    return true
+  end
+
+  local function tui_can_scroll_up()
+    local winid = vim.fn.bufwinid(bufnr)
+    if winid == -1 then
+      return false
+    end
+    return not tui_overscrolled(winid)
+  end
+
+  local function reset_scroll_up_state() end
+
+  -- Always: j/<Down> in normal mode moves cursor down through the terminal scrollback;
+  -- once at the last line, sends SGR scroll-down to the TUI (symmetric with k/<Up>).
+  -- Stays in normal mode — user presses i/a to return to terminal mode explicitly.
+  local function down_or_tui_scroll()
+    local last_line = vim.api.nvim_buf_line_count(bufnr)
+    local cur_line = vim.api.nvim_win_get_cursor(0)[1]
+    reset_scroll_up_state()
+    if cur_line < last_line then
+      vim.cmd("normal! j")
+      return
+    end
+    local ok, chan_id = pcall(vim.api.nvim_buf_get_var, bufnr, "terminal_job_id")
+    if not ok or not chan_id then
+      return
+    end
+    local winid = vim.fn.bufwinid(bufnr)
+    if winid == -1 then
+      return
+    end
+    local row = math.max(1, math.floor(vim.api.nvim_win_get_height(winid) / 2))
+    local col = math.max(1, math.floor(vim.api.nvim_win_get_width(winid) / 2))
+    -- SGR mouse scroll-down (button 65) at the window centre.
+    vim.fn.chansend(chan_id, string.format("\x1b[<65;%d;%dM", col, row))
+  end
+  vim.keymap.set("n", "j", down_or_tui_scroll, { buffer = bufnr, silent = true, desc = "Scroll down or TUI scroll" })
+  vim.keymap.set(
+    "n",
+    "<Down>",
+    down_or_tui_scroll,
+    { buffer = bufnr, silent = true, desc = "Scroll down or TUI scroll" }
+  )
+
+  -- Mouse click in terminal mode: exit to normal mode and position cursor under mouse.
+  -- Subsequent <LeftDrag> events then fire in normal mode where Neovim's native mouse=a
+  -- handling starts character-wise visual selection. Trade-off: clicks no longer forward
+  -- to the Claude Code TUI; re-enter terminal mode (e.g. `i`) to interact with the TUI.
+  local function exit_to_normal_at_mouse()
+    local mp = vim.fn.getmousepos()
+    vim.cmd("stopinsert")
+    if mp.winid and mp.winid ~= 0 then
+      pcall(vim.api.nvim_set_current_win, mp.winid)
+    end
+    if mp.line and mp.line > 0 then
+      local col = math.max(0, (mp.column or 1) - 1)
+      pcall(vim.api.nvim_win_set_cursor, 0, { mp.line, col })
+    end
+  end
+  vim.keymap.set(
+    "t",
+    "<LeftMouse>",
+    exit_to_normal_at_mouse,
+    { buffer = bufnr, silent = true, desc = "Exit terminal mode at mouse position" }
+  )
+  -- Fallback: if the click was missed and a drag arrives while still in terminal mode,
+  -- exit and start visual selection here so the user is not stuck.
+  vim.keymap.set("t", "<LeftDrag>", function()
+    exit_to_normal_at_mouse()
+    vim.api.nvim_feedkeys("v", "n", false)
+  end, { buffer = bufnr, silent = true, desc = "Mouse drag: exit terminal and start visual selection" })
+
+  if not config.scroll_up_enabled then
+    -- Helper: forward an SGR scroll-up event to the TUI at given (row, col).
+    local function send_scroll_up(row, col)
+      local ok, chan_id = pcall(vim.api.nvim_buf_get_var, bufnr, "terminal_job_id")
+      if not ok or not chan_id then
+        return
+      end
+      vim.fn.chansend(chan_id, string.format("\x1b[<64;%d;%dM", col, row))
+    end
+
+    -- k/<Up> in normal mode: move cursor up normally; once cursor reaches line 1 (top of
+    -- the terminal scrollback), send SGR scroll-up to the TUI so Claude Code scrolls back.
+    local function up_or_tui_scroll()
+      local cur_line = vim.api.nvim_win_get_cursor(0)[1]
+      if cur_line > 1 then
+        vim.cmd("normal! k")
+        reset_scroll_up_state()
+        return
+      end
+      if not tui_can_scroll_up() then
+        return
+      end
+      local winid = vim.fn.bufwinid(bufnr)
+      if winid == -1 then
+        return
+      end
+      local row = math.max(1, math.floor(vim.api.nvim_win_get_height(winid) / 2))
+      local col = math.max(1, math.floor(vim.api.nvim_win_get_width(winid) / 2))
+      send_scroll_up(row, col)
+    end
+    vim.keymap.set("n", "k", up_or_tui_scroll, { buffer = bufnr, silent = true, desc = "Scroll up or TUI scroll" })
+    vim.keymap.set("n", "<Up>", up_or_tui_scroll, { buffer = bufnr, silent = true, desc = "Scroll up or TUI scroll" })
+
+    -- Mouse <ScrollWheelUp>: route through the same guarded path as keyboard k for both
+    -- normal and terminal modes. Without the normal-mode mapping Neovim's default wheel
+    -- handling forwards directly to Claude Code with no guard, causing over-scroll.
+    -- One chansend per wheel tick keeps the scroll ratio identical to native forwarding.
+    local function mouse_scroll_up()
+      if not tui_can_scroll_up() then
+        return
+      end
+      local mp = vim.fn.getmousepos()
+      local row = math.max(1, mp.winrow or 1)
+      local col = math.max(1, mp.wincol or 1)
+      send_scroll_up(row, col)
+    end
+    vim.keymap.set(
+      { "n", "t", "x" },
+      "<ScrollWheelUp>",
+      mouse_scroll_up,
+      { buffer = bufnr, silent = true, desc = "Scroll Claude Code TUI up (over-scroll guarded)" }
+    )
+
+    -- Mouse <ScrollWheelDown>: forward via chansend in both modes and reset the over-scroll
+    -- guard so subsequent scroll-ups work again.
+    local function mouse_scroll_down()
+      reset_scroll_up_state()
+      local ok, chan_id = pcall(vim.api.nvim_buf_get_var, bufnr, "terminal_job_id")
+      if not ok or not chan_id then
+        return
+      end
+      local mp = vim.fn.getmousepos()
+      local row = math.max(1, mp.winrow or 1)
+      local col = math.max(1, mp.wincol or 1)
+      vim.fn.chansend(chan_id, string.format("\x1b[<65;%d;%dM", col, row))
+    end
+    vim.keymap.set(
+      { "n", "t", "x" },
+      "<ScrollWheelDown>",
+      mouse_scroll_down,
+      { buffer = bufnr, silent = true, desc = "Scroll Claude Code TUI down" }
+    )
+
+    -- <PageUp>/<PageDown>: send a window-sized burst of SGR scroll events to Claude Code
+    -- instead of letting Neovim scroll the buffer view (which over-scrolls past the end).
+    -- Page size mirrors Vim's <C-f>/<C-b> convention of window_height - 2.
+    local function page_size(winid)
+      return math.max(1, vim.api.nvim_win_get_height(winid) - 2)
+    end
+
+    local function page_up()
+      local winid = vim.fn.bufwinid(bufnr)
+      if winid == -1 then
+        return
+      end
+      local row = math.max(1, math.floor(vim.api.nvim_win_get_height(winid) / 2))
+      local col = math.max(1, math.floor(vim.api.nvim_win_get_width(winid) / 2))
+      for _ = 1, page_size(winid) do
+        if not tui_can_scroll_up() then
+          break
+        end
+        send_scroll_up(row, col)
+      end
+    end
+    vim.keymap.set(
+      { "n", "t", "x" },
+      "<PageUp>",
+      page_up,
+      { buffer = bufnr, silent = true, desc = "Page up Claude Code TUI" }
+    )
+
+    local function page_down()
+      reset_scroll_up_state()
+      local ok, chan_id = pcall(vim.api.nvim_buf_get_var, bufnr, "terminal_job_id")
+      if not ok or not chan_id then
+        return
+      end
+      local winid = vim.fn.bufwinid(bufnr)
+      if winid == -1 then
+        return
+      end
+      local row = math.max(1, math.floor(vim.api.nvim_win_get_height(winid) / 2))
+      local col = math.max(1, math.floor(vim.api.nvim_win_get_width(winid) / 2))
+      local seq = string.format("\x1b[<65;%d;%dM", col, row)
+      for _ = 1, page_size(winid) do
+        vim.fn.chansend(chan_id, seq)
+      end
+    end
+    vim.keymap.set(
+      { "n", "t", "x" },
+      "<PageDown>",
+      page_down,
+      { buffer = bufnr, silent = true, desc = "Page down Claude Code TUI" }
+    )
+
+    return
+  end
+
+  -- scroll_up_enabled = true: intercept wheel events so the user can browse Neovim's
+  -- scrollback buffer.  Defer to run after any async keymap setup (e.g. snacks).
+  vim.schedule(function()
+    if not vim.api.nvim_buf_is_valid(bufnr) then
+      return
+    end
+
+    -- Exit terminal mode then move cursor up 3 lines (which scrolls the viewport).
+    -- feedkeys + vim.schedule sequences the mode switch before the cursor movement.
+    vim.keymap.set("t", "<ScrollWheelUp>", function()
+      local winid = vim.fn.win_getid()
+      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<C-\\><C-n>", true, false, true), "n", false)
+      vim.schedule(function()
+        if vim.api.nvim_win_is_valid(winid) then
+          vim.api.nvim_win_call(winid, function()
+            vim.cmd("normal! 3k")
+          end)
+        end
+      end)
+    end, { buffer = bufnr, silent = true, desc = "Scroll up in terminal scrollback" })
+
+    -- Scroll down in normal mode; return to terminal mode when cursor reaches last line.
+    vim.keymap.set("n", "<ScrollWheelDown>", function()
+      local last_line = vim.api.nvim_buf_line_count(bufnr)
+      local cur_line = vim.api.nvim_win_get_cursor(0)[1]
+      local win_h = vim.api.nvim_win_get_height(0)
+      if cur_line + win_h >= last_line then
+        vim.cmd("normal! G")
+        vim.cmd("startinsert")
+      else
+        vim.cmd("normal! 3j")
+      end
+    end, { buffer = bufnr, silent = true, desc = "Scroll down; return to terminal at bottom" })
+  end)
+end
+
+---Cleanup ESC state for a buffer (call when buffer is deleted)
+---@param bufnr number The terminal buffer number
+function M.cleanup_esc_state(bufnr)
+  local state = esc_state[bufnr]
+  if state then
+    if state.timer then
+      state.timer:stop()
+      state.timer:close()
+    end
+    esc_state[bufnr] = nil
+  end
+end
 
 -- Lazy load providers
 local providers = {}
@@ -204,7 +1020,7 @@ local function build_config(opts_override)
   if type(opts_override) == "table" then
     local validators = {
       split_side = function(val)
-        return val == "left" or val == "right"
+        return val == "left" or val == "right" or val == "top" or val == "bottom"
       end,
       split_width_percentage = function(val)
         return type(val) == "number" and val > 0 and val < 1
@@ -266,6 +1082,16 @@ local function build_config(opts_override)
       resolved_cwd = cwd_mod.git_root(cwd_ctx.file_dir or cwd_ctx.cwd)
     end
   end
+  -- Final fallback: tab/window-aware cwd. Without this, termopen({cwd=nil})
+  -- inherits Neovim's process cwd and ignores :tcd / :lcd, so a Claude
+  -- terminal launched in a tab that switched into a worktree via :tcd would
+  -- still spawn in the original startup directory.
+  if not resolved_cwd then
+    local ok_g, cwd_g = pcall(vim.fn.getcwd)
+    if ok_g and type(cwd_g) == "string" and cwd_g ~= "" then
+      resolved_cwd = cwd_g
+    end
+  end
 
   return {
     split_side = effective_config.split_side,
@@ -274,6 +1100,13 @@ local function build_config(opts_override)
     auto_insert = effective_config.auto_insert,
     snacks_win_opts = effective_config.snacks_win_opts,
     cwd = resolved_cwd,
+    keymaps = effective_config.keymaps,
+    esc_timeout = effective_config.esc_timeout,
+    split_navigation = effective_config.split_navigation,
+    tui_keymaps = effective_config.tui_keymaps,
+    scroll_up_enabled = effective_config.scroll_up_enabled,
+    -- Snacks builds its window title (the session tab strip) from tabs.enabled.
+    tabs = effective_config.tabs,
   }
 end
 
@@ -285,8 +1118,12 @@ local function is_terminal_visible(bufnr)
     return false
   end
 
-  local bufinfo = vim.fn.getbufinfo(bufnr)
-  if not (bufinfo and #bufinfo > 0) then
+  -- Protect against missing vim.fn.getbufinfo in test environment
+  if not vim.fn or not vim.fn.getbufinfo then
+    return false
+  end
+  local ok_info, bufinfo = pcall(vim.fn.getbufinfo, bufnr)
+  if not (ok_info and bufinfo and #bufinfo > 0) then
     return false
   end
   -- A config-hidden window (e.g. a Snacks float parked via
@@ -336,6 +1173,36 @@ local function no_proxy_with_loopback(...)
   end
 
   return table.concat(entries, ",")
+end
+
+---Attach the tab bar to a terminal window if tabs are enabled
+---@param terminal_winid number The terminal window ID
+---@param terminal_bufnr number|nil The terminal buffer number (for keymaps)
+local function attach_tabbar(terminal_winid, terminal_bufnr)
+  if not defaults.tabs or not defaults.tabs.enabled then
+    return
+  end
+
+  if not terminal_winid or not vim.api.nvim_win_is_valid(terminal_winid) then
+    return
+  end
+
+  local ok, tabbar = pcall(require, "claudecode.terminal.tabbar")
+  if ok then
+    tabbar.attach(terminal_winid, terminal_bufnr)
+  end
+end
+
+---Detach the tab bar from the terminal
+local function detach_tabbar()
+  if not defaults.tabs or not defaults.tabs.enabled then
+    return
+  end
+
+  local ok, tabbar = pcall(require, "claudecode.terminal.tabbar")
+  if ok then
+    tabbar.detach()
+  end
 end
 
 ---Gets the claude command string and necessary environment variables
@@ -389,31 +1256,63 @@ local function get_claude_command_and_env(cmd_args)
   return cmd_string, env_table
 end
 
----Common helper to open terminal without focus if not already visible
+---Common helper to open terminal without focus if not already visible.
+---Targets the current tab's session (see ensure_current_tab_session): the
+---tab's own session with per_tab_sessions on, otherwise the shared active
+---session, shown in the current tab. Creates one only when none exists.
 ---@param opts_override table? Optional config overrides
 ---@param cmd_args string? Optional command arguments
 ---@return boolean visible True if terminal was opened or already visible
 local function ensure_terminal_visible_no_focus(opts_override, cmd_args)
   local provider = get_provider()
 
-  -- Check if provider has an ensure_visible method
+  -- Provider-managed visibility (e.g. snacks `ensure_visible`) bypasses our
+  -- session logic; rely on the provider knowing what to do.
   if provider.ensure_visible then
     provider.ensure_visible()
     return true
   end
 
-  local active_bufnr = provider.get_active_bufnr()
-
-  if is_terminal_visible(active_bufnr) then
-    -- Terminal is already visible, do nothing
-    return true
-  end
-
-  -- Terminal is not visible, open it without focus
   local effective_config = build_config(opts_override)
   local cmd_string, claude_env_table = get_claude_command_and_env(cmd_args)
 
-  provider.open(cmd_string, claude_env_table, effective_config, false) -- false = don't focus
+  if provider.open_session then
+    -- Session-aware path. A live terminal can still be hidden (native: managed
+    -- window closed by a toggle; Snacks: parked float or closed split). Only
+    -- skip when it is actually on screen; otherwise re-show it without focus.
+    if provider.get_session_window then
+      if visible_tab_session(provider) then
+        return true
+      end
+    elseif current_tab_has_live_terminal() and require("claudecode.terminal.window_manager").is_visible() then
+      return true
+    end
+    local session_id, newly_created = ensure_current_tab_session()
+    provider.open_session(session_id, cmd_string, claude_env_table, effective_config, false)
+    if newly_created then
+      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider, cmd_args, effective_config.cwd)
+    end
+    return true
+  end
+
+  -- Legacy provider path
+  local active_bufnr = provider.get_active_bufnr()
+  local had_terminal = active_bufnr ~= nil
+
+  if is_terminal_visible(active_bufnr) then
+    return true
+  end
+
+  provider.open(cmd_string, claude_env_table, effective_config, false)
+
+  if not had_terminal then
+    local new_bufnr = provider.get_active_bufnr()
+    if new_bufnr then
+      local session_id = session_manager.ensure_session()
+      finalize_session_terminal(session_id, new_bufnr, provider)
+    end
+  end
+
   return true
 end
 
@@ -452,7 +1351,7 @@ function M.setup(user_term_config, p_terminal_cmd, p_env)
 
   for k, v in pairs(user_term_config) do
     if k == "split_side" then
-      if v == "left" or v == "right" then
+      if v == "left" or v == "right" or v == "top" or v == "bottom" then
         defaults.split_side = v
       else
         vim.notify("claudecode.terminal.setup: Invalid value for split_side: " .. tostring(v), vim.log.levels.WARN)
@@ -573,6 +1472,149 @@ function M.setup(user_term_config, p_terminal_cmd, p_env)
       else
         vim.notify("claudecode.terminal.setup: Invalid cwd_provider type: " .. tostring(t), vim.log.levels.WARN)
       end
+    elseif k == "keymaps" then
+      if type(v) == "table" then
+        defaults.keymaps = defaults.keymaps or {}
+        for keymap_k, keymap_v in pairs(v) do
+          if keymap_k == "exit_terminal" then
+            if keymap_v == false or type(keymap_v) == "string" then
+              defaults.keymaps.exit_terminal = keymap_v
+            else
+              vim.notify(
+                "claudecode.terminal.setup: Invalid value for keymaps.exit_terminal: "
+                  .. tostring(keymap_v)
+                  .. ". Must be a string or false.",
+                vim.log.levels.WARN
+              )
+            end
+          else
+            vim.notify("claudecode.terminal.setup: Unknown keymap key: " .. tostring(keymap_k), vim.log.levels.WARN)
+          end
+        end
+      else
+        vim.notify(
+          "claudecode.terminal.setup: Invalid value for keymaps: " .. tostring(v) .. ". Must be a table.",
+          vim.log.levels.WARN
+        )
+      end
+    elseif k == "esc_timeout" then
+      if v == nil or (type(v) == "number" and v >= 0) then
+        defaults.esc_timeout = v
+      else
+        vim.notify(
+          "claudecode.terminal.setup: Invalid value for esc_timeout: "
+            .. tostring(v)
+            .. ". Must be a number >= 0 or nil.",
+          vim.log.levels.WARN
+        )
+      end
+    elseif k == "cleanup_strategy" then
+      local valid_strategies = { pkill_children = true, jobstop_only = true, aggressive = true, none = true }
+      if valid_strategies[v] then
+        defaults.cleanup_strategy = v
+      else
+        vim.notify(
+          "claudecode.terminal.setup: Invalid value for cleanup_strategy: "
+            .. tostring(v)
+            .. ". Must be one of: pkill_children, jobstop_only, aggressive, none.",
+          vim.log.levels.WARN
+        )
+      end
+    elseif k == "tabs" then
+      if type(v) == "table" then
+        defaults.tabs = defaults.tabs or {}
+        for tabs_k, tabs_v in pairs(v) do
+          if tabs_k == "enabled" then
+            if type(tabs_v) == "boolean" then
+              defaults.tabs.enabled = tabs_v
+            else
+              vim.notify(
+                "claudecode.terminal.setup: Invalid value for tabs.enabled: " .. tostring(tabs_v),
+                vim.log.levels.WARN
+              )
+            end
+          elseif tabs_k == "height" then
+            if type(tabs_v) == "number" and tabs_v >= 1 then
+              defaults.tabs.height = tabs_v
+            else
+              vim.notify(
+                "claudecode.terminal.setup: Invalid value for tabs.height: " .. tostring(tabs_v),
+                vim.log.levels.WARN
+              )
+            end
+          elseif tabs_k == "show_close_button" then
+            if type(tabs_v) == "boolean" then
+              defaults.tabs.show_close_button = tabs_v
+            end
+          elseif tabs_k == "show_new_button" then
+            if type(tabs_v) == "boolean" then
+              defaults.tabs.show_new_button = tabs_v
+            end
+          elseif tabs_k == "separator" then
+            if type(tabs_v) == "string" then
+              defaults.tabs.separator = tabs_v
+            end
+          elseif tabs_k == "active_indicator" then
+            if type(tabs_v) == "string" then
+              defaults.tabs.active_indicator = tabs_v
+            end
+          elseif tabs_k == "mouse_enabled" then
+            if type(tabs_v) == "boolean" then
+              defaults.tabs.mouse_enabled = tabs_v
+            end
+          elseif tabs_k == "keymaps" then
+            if type(tabs_v) == "table" then
+              defaults.tabs.keymaps = defaults.tabs.keymaps or {}
+              for km_k, km_v in pairs(tabs_v) do
+                if km_v == false or type(km_v) == "string" then
+                  defaults.tabs.keymaps[km_k] = km_v
+                end
+              end
+            end
+          end
+        end
+      else
+        vim.notify(
+          "claudecode.terminal.setup: Invalid value for tabs: " .. tostring(v) .. ". Must be a table.",
+          vim.log.levels.WARN
+        )
+      end
+    elseif k == "split_navigation" then
+      if type(v) == "boolean" then
+        defaults.split_navigation = v
+      else
+        vim.notify(
+          "claudecode.terminal.setup: Invalid value for split_navigation: " .. tostring(v) .. ". Must be a boolean.",
+          vim.log.levels.WARN
+        )
+      end
+    elseif k == "per_tab_sessions" then
+      if type(v) == "boolean" then
+        defaults.per_tab_sessions = v
+      else
+        vim.notify(
+          "claudecode.terminal.setup: Invalid value for per_tab_sessions: " .. tostring(v) .. ". Must be a boolean.",
+          vim.log.levels.WARN
+        )
+      end
+    elseif k == "tui_keymaps" then
+      if type(v) == "boolean" then
+        defaults.tui_keymaps = v
+      else
+        vim.notify(
+          "claudecode.terminal.setup: Invalid value for tui_keymaps: " .. tostring(v) .. ". Must be a boolean.",
+          vim.log.levels.WARN
+        )
+      end
+    elseif k == "scroll_up_enabled" then
+      if type(v) == "boolean" then
+        defaults.scroll_up_enabled = v
+      else
+        vim.notify(
+          "claudecode.terminal.setup: Invalid value for scroll_up_enabled: " .. tostring(v) .. ". Must be a boolean.",
+          vim.log.levels.WARN
+        )
+      end
     else
       if k ~= "terminal_cmd" then
         vim.notify("claudecode.terminal.setup: Unknown configuration key: " .. k, vim.log.levels.WARN)
@@ -580,46 +1622,258 @@ function M.setup(user_term_config, p_terminal_cmd, p_env)
     end
   end
 
+  tab_registry.set_per_tab_enabled(defaults.per_tab_sessions)
+
+  setup_buffer_cleanup_autocmd()
+
+  -- Forget tracked PIDs whose jobs are gone (Fix 3: Plugin Reload
+  -- Protection). Deferred to setup() so this module has no side effects at
+  -- require time. Nothing is signaled here; see prune_stale_tracked_pids.
+  prune_stale_tracked_pids()
+
+  -- Setup window manager with config
+  local window_manager = require("claudecode.terminal.window_manager")
+  window_manager.setup({
+    split_side = defaults.split_side,
+    split_width_percentage = defaults.split_width_percentage,
+    auto_insert = defaults.auto_insert,
+  })
+
   -- Setup providers with config
   get_provider().setup(defaults)
 
   -- Streamed-paste compatibility shim for #161 (no-op on Neovim >= 0.12.2).
   require("claudecode.terminal.paste_fix").apply(defaults.fix_streamed_paste)
+  -- Setup tab bar if configured
+  if defaults.tabs then
+    local ok, tabbar = pcall(require, "claudecode.terminal.tabbar")
+    if ok then
+      tabbar.setup(defaults.tabs)
+    end
+  end
 end
 
----Opens or focuses the Claude terminal.
+---Opens or focuses the Claude terminal for the current tabpage.
 ---@param opts_override table? Overrides for terminal appearance (split_side, split_width_percentage).
 ---@param cmd_args string? Arguments to append to the claude command.
 function M.open(opts_override, cmd_args)
   local effective_config = build_config(opts_override)
   local cmd_string, claude_env_table = get_claude_command_and_env(cmd_args)
+  local provider = get_provider()
+  if open_session_for_new_args(provider, opts_override, cmd_args) then
+    return
+  end
 
-  get_provider().open(cmd_string, claude_env_table, effective_config)
+  if provider.open_session then
+    -- Session-aware path: route through the session-aware provider API.
+    local session_id, newly_created = ensure_current_tab_session()
+    provider.open_session(session_id, cmd_string, claude_env_table, effective_config, true)
+    if newly_created then
+      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider, cmd_args, effective_config.cwd)
+    end
+  else
+    -- Legacy / custom provider without per-session support: keep historic behavior.
+    local had_terminal = provider.get_active_bufnr() ~= nil
+    provider.open(cmd_string, claude_env_table, effective_config)
+    if not had_terminal then
+      local active_bufnr = provider.get_active_bufnr()
+      if active_bufnr then
+        local session_id = session_manager.ensure_session()
+        finalize_session_terminal(session_id, active_bufnr, provider)
+      end
+    end
+  end
+
+  -- Attach tab bar if enabled (find terminal window from buffer)
+  local active_bufnr = provider.get_active_bufnr()
+  if active_bufnr and vim.fn.getbufinfo then
+    local ok, bufinfo = pcall(vim.fn.getbufinfo, active_bufnr)
+    if ok and bufinfo and #bufinfo > 0 and #bufinfo[1].windows > 0 then
+      attach_tabbar(bufinfo[1].windows[1], active_bufnr)
+    end
+  end
 end
 
 ---Closes the managed Claude terminal if it's open and valid.
 function M.close()
+  detach_tabbar()
+  -- Call provider's close for backwards compatibility
   get_provider().close()
 end
 
----Simple toggle: always show/hide the Claude terminal regardless of focus.
+---Simple toggle: show/hide the Claude terminal for the current tabpage.
 ---@param opts_override table? Overrides for terminal appearance (split_side, split_width_percentage).
 ---@param cmd_args string? Arguments to append to the claude command.
 function M.simple_toggle(opts_override, cmd_args)
   local effective_config = build_config(opts_override)
   local cmd_string, claude_env_table = get_claude_command_and_env(cmd_args)
+  local provider = get_provider()
+  if open_session_for_new_args(provider, opts_override, cmd_args) then
+    return
+  end
 
-  get_provider().simple_toggle(cmd_string, claude_env_table, effective_config)
+  if provider.open_session then
+    -- Session-aware path
+    if provider.hide_session then
+      -- Provider owns its windows (Snacks park/unpark): hide through it so a
+      -- float is config-hidden rather than destroyed (climbing cursor, #271).
+      local visible_sid = visible_tab_session(provider)
+      if visible_sid then
+        provider.hide_session(visible_sid)
+        detach_tabbar()
+        return
+      end
+    else
+      local window_manager = require("claudecode.terminal.window_manager")
+
+      if window_manager.is_visible() and current_tab_has_live_terminal() then
+        window_manager.close_window()
+        detach_tabbar()
+        return
+      end
+    end
+
+    -- Upstream semantics: showing (or creating) the terminal focuses it; the
+    -- provider enters insert mode unless terminal.auto_insert is false.
+    local session_id, newly_created = ensure_current_tab_session()
+    provider.open_session(session_id, cmd_string, claude_env_table, effective_config, true)
+    if newly_created then
+      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider, cmd_args, effective_config.cwd)
+    end
+
+    local active_bufnr = provider.get_active_bufnr()
+    if active_bufnr and vim.fn.getbufinfo then
+      local ok, bufinfo = pcall(vim.fn.getbufinfo, active_bufnr)
+      if ok and bufinfo and #bufinfo > 0 and #bufinfo[1].windows > 0 then
+        attach_tabbar(bufinfo[1].windows[1], active_bufnr)
+      end
+    end
+    return
+  end
+
+  -- Legacy provider path (no open_session): preserve historic behavior so
+  -- custom providers (and test mocks) keep working unchanged.
+  local had_terminal = provider.get_active_bufnr() ~= nil
+  local was_visible = is_terminal_visible(provider.get_active_bufnr())
+
+  provider.simple_toggle(cmd_string, claude_env_table, effective_config)
+
+  if not had_terminal then
+    local active_bufnr = provider.get_active_bufnr()
+    if active_bufnr then
+      local session_id = session_manager.ensure_session()
+      finalize_session_terminal(session_id, active_bufnr, provider)
+    end
+  end
+
+  local active_bufnr = provider.get_active_bufnr()
+  local is_visible_now = is_terminal_visible(active_bufnr)
+
+  if is_visible_now and not was_visible then
+    if active_bufnr and vim.fn.getbufinfo then
+      local ok, bufinfo = pcall(vim.fn.getbufinfo, active_bufnr)
+      if ok and bufinfo and #bufinfo > 0 and #bufinfo[1].windows > 0 then
+        attach_tabbar(bufinfo[1].windows[1], active_bufnr)
+      end
+    end
+  elseif was_visible and not is_visible_now then
+    detach_tabbar()
+  end
 end
 
 ---Smart focus toggle: switches to terminal if not focused, hides if currently focused.
+---Operates on the current tabpage's session.
 ---@param opts_override table (optional) Overrides for terminal appearance (split_side, split_width_percentage).
 ---@param cmd_args string|nil (optional) Arguments to append to the claude command.
 function M.focus_toggle(opts_override, cmd_args)
   local effective_config = build_config(opts_override)
   local cmd_string, claude_env_table = get_claude_command_and_env(cmd_args)
+  local provider = get_provider()
+  if open_session_for_new_args(provider, opts_override, cmd_args) then
+    return
+  end
 
-  get_provider().focus_toggle(cmd_string, claude_env_table, effective_config)
+  if provider.open_session then
+    local session_id, newly_created
+    if provider.hide_session then
+      -- Provider owns its windows (Snacks park/unpark). Focused -> park it;
+      -- visible but unfocused -> open_session below focuses that session.
+      local visible_sid, winid = visible_tab_session(provider)
+      if visible_sid and winid == vim.api.nvim_get_current_win() then
+        provider.hide_session(visible_sid)
+        detach_tabbar()
+        return
+      end
+      if visible_sid then
+        session_id, newly_created = visible_sid, false
+        session_manager.set_active_session(visible_sid)
+      end
+    else
+      local window_manager = require("claudecode.terminal.window_manager")
+
+      if window_manager.is_visible() and current_tab_has_live_terminal() then
+        local winid = window_manager.get_window()
+        local current_win = vim.api.nvim_get_current_win()
+        if winid == current_win then
+          window_manager.close_window()
+          detach_tabbar()
+          return
+        end
+        if winid then
+          vim.api.nvim_set_current_win(winid)
+          if effective_config.auto_insert ~= false then
+            pcall(vim.cmd, "startinsert")
+          end
+          return
+        end
+      end
+    end
+
+    if not session_id then
+      session_id, newly_created = ensure_current_tab_session()
+    end
+    provider.open_session(session_id, cmd_string, claude_env_table, effective_config, true)
+    if newly_created then
+      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider, cmd_args, effective_config.cwd)
+    end
+
+    local active_bufnr = provider.get_active_bufnr()
+    if active_bufnr and vim.fn.getbufinfo then
+      local ok, bufinfo = pcall(vim.fn.getbufinfo, active_bufnr)
+      if ok and bufinfo and #bufinfo > 0 and #bufinfo[1].windows > 0 then
+        attach_tabbar(bufinfo[1].windows[1], active_bufnr)
+      end
+    end
+    return
+  end
+
+  -- Legacy provider path
+  local had_terminal = provider.get_active_bufnr() ~= nil
+  local was_visible = is_terminal_visible(provider.get_active_bufnr())
+
+  provider.focus_toggle(cmd_string, claude_env_table, effective_config)
+
+  if not had_terminal then
+    local active_bufnr = provider.get_active_bufnr()
+    if active_bufnr then
+      local session_id = session_manager.ensure_session()
+      finalize_session_terminal(session_id, active_bufnr, provider)
+    end
+  end
+
+  local active_bufnr = provider.get_active_bufnr()
+  local is_visible_now = is_terminal_visible(active_bufnr)
+
+  if is_visible_now and not was_visible then
+    if active_bufnr and vim.fn.getbufinfo then
+      local ok, bufinfo = pcall(vim.fn.getbufinfo, active_bufnr)
+      if ok and bufinfo and #bufinfo > 0 and #bufinfo[1].windows > 0 then
+        attach_tabbar(bufinfo[1].windows[1], active_bufnr)
+      end
+    end
+  elseif was_visible and not is_visible_now then
+    detach_tabbar()
+  end
 end
 
 ---Toggle open terminal without focus if not already visible, otherwise do nothing.
@@ -651,6 +1905,41 @@ function M.get_active_terminal_bufnr()
   return get_provider().get_active_bufnr()
 end
 
+---Resolve the terminal buffer that a session-scoped sender (send_to_terminal)
+---should target. Unlike M.get_active_terminal_bufnr(), which reports a
+---provider's single legacy pointer, this prefers the session actually bound to
+---the current tab so that sending text always reaches the pane the user is
+---looking at, not whichever session a provider last focused globally:
+---  1. The current tab's visible session (covers a window-owning provider,
+---     e.g. Snacks, where the tab's active pointer can name a parked session).
+---  2. The current tab's active session id (session_manager.get_active_session_id()
+---     is itself tab-aware; see claudecode.session).
+---  3. The provider's legacy get_active_bufnr(), for providers with no
+---     per-session concept at all (custom single-terminal providers).
+---@param provider ClaudeCodeTerminalProvider The terminal provider module
+---@return number|nil bufnr
+local function resolve_send_target_bufnr(provider)
+  if provider.get_session_bufnr then
+    local visible_sid = visible_tab_session(provider)
+    if visible_sid then
+      local bufnr = provider.get_session_bufnr(visible_sid)
+      if bufnr then
+        return bufnr
+      end
+    end
+
+    local active_sid = session_manager.get_active_session_id()
+    if active_sid then
+      local bufnr = provider.get_session_bufnr(active_sid)
+      if bufnr then
+        return bufnr
+      end
+    end
+  end
+
+  return provider.get_active_bufnr()
+end
+
 ---Sends raw text to the running Claude Code terminal's job channel, as if it were
 ---typed at the prompt. By default a trailing carriage return submits the line.
 ---
@@ -659,6 +1948,10 @@ end
 ---returns false. This function is synchronous and does NOT open the terminal: it
 ---requires one to already be running, otherwise it warns and returns false. The
 ---`:ClaudeCodeSendText` command is a thin wrapper around this.
+---
+---Targets the active session (see resolve_send_target_bufnr), not necessarily
+---whichever terminal a provider last focused: this matters once switching
+---sessions or tabs is in play (#164).
 ---
 ---Multi-line text is wrapped in bracketed-paste markers (ESC[200~ ... ESC[201~) so
 ---embedded newlines arrive as one literal pasted block rather than several premature
@@ -679,7 +1972,7 @@ function M.send_to_terminal(text, opts)
   opts = opts or {}
   local submit = opts.submit ~= false
 
-  local bufnr = M.get_active_terminal_bufnr()
+  local bufnr = resolve_send_target_bufnr(get_provider())
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     local provider_name = type(defaults.provider) == "string" and defaults.provider or "custom"
     if provider_name == "none" or provider_name == "external" then
@@ -758,6 +2051,461 @@ function M._get_managed_terminal_for_test()
     return provider._get_terminal_for_test()
   end
   return nil
+end
+
+-- ============================================================================
+-- Multi-session support functions
+-- ============================================================================
+
+---Opens a new Claude terminal session.
+---@param opts_override table? Overrides for terminal appearance (split_side, split_width_percentage).
+---@param cmd_args string? Arguments to append to the claude command.
+---@return string session_id The ID of the new session
+function M.open_new_session(opts_override, cmd_args)
+  local session_id = session_manager.create_session()
+  local effective_config = build_config(opts_override)
+  local new_session = session_manager.get_session(session_id)
+  new_session.cmd_args = cmd_args
+  new_session.cwd = effective_config.cwd
+  local cmd_string, claude_env_table = get_claude_command_and_env(cmd_args)
+
+  -- Make the new session active immediately and bind it to the current tab.
+  -- Binding before termopen ensures the websocket handshake (which selects the
+  -- newest unbound session) hits a session that already knows its tab.
+  session_manager.set_active_session(session_id)
+  M._bind_to_current_tab(session_id)
+
+  local provider = get_provider()
+
+  -- For multi-session, we need to pass session_id to providers
+  if provider.open_session then
+    provider.open_session(session_id, cmd_string, claude_env_table, effective_config, true) -- true = focus
+  else
+    -- Fallback: use regular open (single terminal mode)
+    provider.open(cmd_string, claude_env_table, effective_config, true) -- true = focus
+  end
+
+  return session_id
+end
+
+---Moves the current tab's active Claude terminal to a new layout without
+---restarting Claude, e.g. from a float to a right split:
+---  require("claudecode.terminal").reposition({ snacks_win_opts = { position = "right" } })
+---Supported by the Snacks provider (`reposition_session`); other providers
+---warn and do nothing.
+---@param opts_override table|nil Terminal overrides, typically snacks_win_opts
+---@return boolean moved
+function M.reposition(opts_override)
+  local provider = get_provider()
+  if not provider.reposition_session then
+    vim.notify("claudecode: reposition is only supported by the snacks terminal provider", vim.log.levels.WARN)
+    return false
+  end
+  local sid = current_tab_session()
+  if not sid then
+    return false
+  end
+  return provider.reposition_session(sid, build_config(opts_override)) == true
+end
+
+---Working directory of the current tab's active session's Claude process, or
+---nil when no session with a live terminal is active. Paths sent to Claude
+---(@ mentions) are made relative to this, not to Neovim's own cwd, because
+---Claude resolves them from the directory it runs in (terminal.cwd,
+---cwd_provider and git_repo_cwd can all make that differ).
+---@return string|nil
+function M.get_active_session_cwd()
+  local _, sess = current_tab_session()
+  if sess and sess.cwd and sess.terminal_bufnr and vim.api.nvim_buf_is_valid(sess.terminal_bufnr) then
+    return sess.cwd
+  end
+  return nil
+end
+
+---Closes a specific session.
+---@param session_id string? The session ID to close (defaults to active session)
+function M.close_session(session_id)
+  session_id = session_id or session_manager.get_active_session_id()
+  if not session_id then
+    return
+  end
+
+  local provider = get_provider()
+  local effective_config = build_config(nil)
+
+  -- Check if there are other sessions to switch to
+  local session_count = session_manager.get_session_count()
+
+  if session_count > 1 then
+    -- There are other sessions - keep the window and switch to another session.
+    -- Prefer another session bound to the same tabpage as the one being
+    -- closed; fall back to global ordering if the tab has no other sessions.
+    local closing_owner_tab = tab_registry.tab_for_session(session_id)
+    local global_sessions = session_manager.list_sessions()
+
+    local sessions = global_sessions
+    if closing_owner_tab then
+      local same_tab = {}
+      for _, s in ipairs(global_sessions) do
+        if tab_registry.tab_for_session(s.id) == closing_owner_tab then
+          table.insert(same_tab, s)
+        end
+      end
+      if #same_tab > 1 then
+        sessions = same_tab
+      end
+    end
+
+    local new_active_id = nil
+    local current_index = nil
+
+    -- Find the index of the session being closed within the chosen list
+    for i, s in ipairs(sessions) do
+      if s.id == session_id then
+        current_index = i
+        break
+      end
+    end
+
+    if current_index then
+      -- Prefer previous tab (index - 1), fallback to next tab (index + 1)
+      if current_index > 1 then
+        new_active_id = sessions[current_index - 1].id
+      elseif current_index < #sessions then
+        new_active_id = sessions[current_index + 1].id
+      end
+    end
+
+    -- Fallback: just pick any other session (from the global list now, in case
+    -- the tab-scoped list was a singleton)
+    if not new_active_id then
+      for _, s in ipairs(global_sessions) do
+        if s.id ~= session_id then
+          new_active_id = s.id
+          break
+        end
+      end
+    end
+
+    if new_active_id and provider.close_session_keep_window then
+      -- Use close_session_keep_window to keep window open and switch buffer
+      -- This function handles cleanup of the old session internally
+      provider.close_session_keep_window(session_id, new_active_id, effective_config)
+      session_manager.destroy_session(session_id)
+      session_manager.set_active_session(new_active_id)
+    else
+      -- Fallback: close and reopen
+      session_manager.destroy_session(session_id)
+      new_active_id = session_manager.get_active_session_id()
+
+      if provider.close_session then
+        provider.close_session(session_id)
+      else
+        provider.close()
+      end
+
+      if new_active_id and provider.focus_session then
+        provider.focus_session(new_active_id, effective_config)
+      end
+    end
+
+    -- Re-attach tabbar to the new session's terminal
+    if new_active_id then
+      local new_bufnr
+      if provider.get_session_bufnr then
+        new_bufnr = provider.get_session_bufnr(new_active_id)
+      else
+        new_bufnr = provider.get_active_bufnr()
+      end
+
+      if new_bufnr and vim.fn.getbufinfo then
+        local ok, bufinfo = pcall(vim.fn.getbufinfo, new_bufnr)
+        if ok and bufinfo and #bufinfo > 0 and #bufinfo[1].windows > 0 then
+          attach_tabbar(bufinfo[1].windows[1], new_bufnr)
+        end
+      end
+    end
+  else
+    -- This is the last session - close everything
+    detach_tabbar()
+
+    if provider.close_session then
+      provider.close_session(session_id)
+    else
+      provider.close()
+    end
+
+    session_manager.destroy_session(session_id)
+  end
+end
+
+---Switches to a specific session.
+---@param session_id string The session ID to switch to
+---@param opts_override table? Optional config overrides
+function M.switch_to_session(session_id, opts_override)
+  local session = session_manager.get_session(session_id)
+  if not session then
+    local logger = require("claudecode.logger")
+    logger.warn("terminal", "Cannot switch to non-existent session: " .. session_id)
+    return
+  end
+
+  session_manager.set_active_session(session_id)
+
+  -- Make the picker selection sticky on the current tab. Without this, the
+  -- next tab-scoped picker call wouldn't see the session the user just chose.
+  M._bind_to_current_tab(session_id)
+
+  local provider = get_provider()
+
+  if provider.focus_session then
+    local effective_config = build_config(opts_override)
+    provider.focus_session(session_id, effective_config)
+  elseif session.terminal_bufnr and vim.api.nvim_buf_is_valid(session.terminal_bufnr) then
+    -- Fallback: try to find and focus the window
+    local windows = vim.api.nvim_list_wins()
+    for _, win in ipairs(windows) do
+      if vim.api.nvim_win_get_buf(win) == session.terminal_bufnr then
+        vim.api.nvim_set_current_win(win)
+        vim.cmd("startinsert")
+        return
+      end
+    end
+  end
+end
+
+---Gets the session ID for the currently focused terminal.
+---@return string|nil session_id The session ID or nil if not in a session terminal
+function M.get_current_session_id()
+  local current_buf = vim.api.nvim_get_current_buf()
+  local session = session_manager.find_session_by_bufnr(current_buf)
+  if session then
+    return session.id
+  end
+  return nil
+end
+
+---Lists all active sessions.
+---@return table[] sessions Array of session info
+function M.list_sessions()
+  return session_manager.list_sessions()
+end
+
+---Lists the sessions the current Neovim tabpage works with. With
+---per_tab_sessions on this is strictly tab-scoped: a session must have an
+---explicit registry binding to the current tab to be returned, and unbound
+---sessions never leak into other tabs. Otherwise (the default) every session
+---is shared by all tabs and all of them are returned.
+---@return ClaudeCodeSession[] sessions Tab-scoped list (empty array when no session belongs to the current tab)
+function M.list_sessions_for_current_tab()
+  if not per_tab() then
+    return session_manager.list_sessions()
+  end
+  local ok, tab = pcall(vim.api.nvim_get_current_tabpage)
+  if not ok or not tab then
+    return {}
+  end
+  local result = {}
+  for _, session in ipairs(session_manager.list_sessions()) do
+    if tab_registry.tab_for_session(session.id) == tab then
+      table.insert(result, session)
+    end
+  end
+  return result
+end
+
+---Gets the number of active sessions.
+---@return number count Number of active sessions
+function M.get_session_count()
+  return session_manager.get_session_count()
+end
+
+---Updates terminal info for a session (called by providers).
+---@param session_id string The session ID
+---@param terminal_info table { bufnr?: number, winid?: number, jobid?: number }
+function M.update_session_terminal_info(session_id, terminal_info)
+  session_manager.update_terminal_info(session_id, terminal_info)
+end
+
+---Gets the active session ID.
+---@return string|nil session_id The active session ID
+function M.get_active_session_id()
+  return session_manager.get_active_session_id()
+end
+
+---Ensures at least one session exists and returns its ID.
+---@return string session_id The session ID
+function M.ensure_session()
+  return session_manager.ensure_session()
+end
+
+---Cleanup all terminal processes (called on Neovim exit).
+---Session id whose Claude terminal is on screen in the current tab, or nil.
+---@return string|nil session_id
+local function visible_session_in_tab()
+  local provider = get_provider()
+  if provider.get_session_window then
+    return (visible_tab_session(provider))
+  end
+  if provider.open_session then
+    local window_manager = require("claudecode.terminal.window_manager")
+    local win = window_manager.is_visible() and window_manager.get_window()
+    if win and vim.api.nvim_win_is_valid(win) then
+      local sess = session_manager.find_session_by_bufnr(vim.api.nvim_win_get_buf(win))
+      return sess and sess.id or nil
+    end
+    return nil
+  end
+  if is_terminal_visible(provider.get_active_bufnr()) then
+    return session_manager.get_active_session_id() or "default"
+  end
+  return nil
+end
+
+local visibility_depth = 0
+
+---Captures every return value with its count (nil holes included).
+---@return table results Array of all arguments, with `.n` set to the count.
+local function pack_results(...)
+  return { n = select("#", ...), ... }
+end
+
+---visible_session_in_tab that can never raise: event bookkeeping must not
+---break the terminal operation it observes.
+---@return string|nil
+local function safe_visible_session()
+  local ok, sid = pcall(visible_session_in_tab)
+  return ok and sid or nil
+end
+
+---Wraps a public terminal operation so it fires `User ClaudeCodeTerminalOpened`
+---when the current tab's Claude terminal goes from hidden to shown, and
+---`User ClaudeCodeTerminalHidden` for the reverse (data: { session_id }).
+---Only the outermost call fires (operations call each other), and only
+---plugin-driven changes are reported: closing the window by hand does not.
+---@param fn function
+---@return function
+local function with_visibility_events(fn)
+  return function(...)
+    if visibility_depth > 0 or not (vim.api and vim.api.nvim_exec_autocmds) then
+      return fn(...)
+    end
+    local before = safe_visible_session()
+    visibility_depth = visibility_depth + 1
+    local results = pack_results(pcall(fn, ...))
+    visibility_depth = visibility_depth - 1
+    if not results[1] then
+      error(results[2], 0)
+    end
+    local after = safe_visible_session()
+    if after and not before then
+      pcall(vim.api.nvim_exec_autocmds, "User", {
+        pattern = "ClaudeCodeTerminalOpened",
+        modeline = false,
+        data = { session_id = after },
+      })
+    elseif before and not after then
+      pcall(vim.api.nvim_exec_autocmds, "User", {
+        pattern = "ClaudeCodeTerminalHidden",
+        modeline = false,
+        data = { session_id = before },
+      })
+    end
+    return unpack(results, 2, results.n)
+  end
+end
+
+for _, name in ipairs({
+  "open",
+  "close",
+  "simple_toggle",
+  "focus_toggle",
+  "toggle_open_no_focus",
+  "ensure_visible",
+  "toggle",
+  "open_new_session",
+  "close_session",
+  "switch_to_session",
+}) do
+  M[name] = with_visibility_events(M[name])
+end
+
+---Ensures no orphan Claude processes remain by killing all terminal jobs.
+---Uses the configured cleanup_strategy to determine how processes are terminated.
+---Implements defense-in-depth: recovers PIDs from sessions and terminal buffers
+---even if they weren't properly tracked.
+function M.cleanup_all()
+  local logger = require("claudecode.logger")
+  local strategy = defaults.cleanup_strategy or "pkill_children"
+
+  -- Defense-in-depth: Recover PIDs from session manager
+  -- This catches any terminals whose PIDs weren't properly tracked
+  local session_mgr_ok, session_mgr = pcall(require, "claudecode.session")
+  if session_mgr_ok and session_mgr.list_sessions then
+    for _, session in ipairs(session_mgr.list_sessions()) do
+      if session.terminal_jobid and not tracked_pids[session.terminal_jobid] then
+        local pid_ok, pid = pcall(vim.fn.jobpid, session.terminal_jobid)
+        if pid_ok and pid and pid > 0 then
+          tracked_pids[session.terminal_jobid] = pid
+          logger.debug("terminal", "Recovered PID " .. pid .. " from session " .. session.id)
+        end
+      end
+    end
+  end
+
+  -- Defense-in-depth: Recover PIDs from Claude terminal buffers
+  -- This catches any Claude terminal buffers that weren't associated with
+  -- sessions. Only buffers the providers flagged with
+  -- b:claudecode_terminal = true are considered: the user's own :terminal
+  -- buffers (also buftype=terminal) are never ours to kill.
+  local list_bufs_ok, bufs = pcall(vim.api.nvim_list_bufs)
+  if list_bufs_ok and bufs then
+    for _, bufnr in ipairs(bufs) do
+      local valid_ok, is_valid = pcall(vim.api.nvim_buf_is_valid, bufnr)
+      if valid_ok and is_valid then
+        local buftype_ok, buftype = pcall(vim.api.nvim_get_option_value, "buftype", { buf = bufnr })
+        local flag_ok, is_claude = pcall(vim.api.nvim_buf_get_var, bufnr, "claudecode_terminal")
+        if buftype_ok and buftype == "terminal" and flag_ok and is_claude == true then
+          local job_ok, job_id = pcall(vim.api.nvim_buf_get_var, bufnr, "terminal_job_id")
+          if job_ok and job_id and not tracked_pids[job_id] then
+            local pid_ok, pid = pcall(vim.fn.jobpid, job_id)
+            if pid_ok and pid and pid > 0 then
+              tracked_pids[job_id] = pid
+              logger.debug("terminal", "Recovered PID " .. pid .. " from terminal buffer " .. bufnr)
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- Collect job_id/pid entries first (don't stop jobs yet - that's the race condition!)
+  -- Only jobs that are still running are included: a job that already exited
+  -- is dropped, never signaled, because its PID may have been reused by an
+  -- unrelated process.
+  local entries = {}
+  local pid_count = 0
+  for job_id, pid in pairs(tracked_pids) do
+    local live = live_job_pid(job_id)
+    if live and live == pid then
+      table.insert(entries, { job_id = job_id, pid = pid })
+      pid_count = pid_count + 1
+    else
+      logger.debug("terminal", "cleanup_all: dropping stale PID " .. tostring(pid) .. " (job " .. job_id .. " exited)")
+    end
+  end
+
+  logger.debug("terminal", "cleanup_all: strategy=" .. strategy .. ", found " .. pid_count .. " PIDs")
+
+  -- Runs at most one detached shell job for the whole batch (never blocks the
+  -- UI), then jobstops each Neovim job. See process_cleanup for per-strategy
+  -- signal semantics ("none" skips everything, including jobstop).
+  local process_cleanup = require("claudecode.terminal.process_cleanup")
+  process_cleanup.stop_many(entries, strategy)
+
+  -- Clear tracked PIDs (update both local and global)
+  tracked_pids = {}
+  _G._claudecode_tracked_pids = tracked_pids
 end
 
 return M

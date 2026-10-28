@@ -201,6 +201,50 @@ describe("Configuration", function()
     expect(success).to_be_false()
   end)
 
+  it("should default ide_name to the plain upstream label", function()
+    local applied = config.apply({})
+    expect(applied.ide_name.context).to_be(false)
+    expect(applied.ide_name.override).to_be_nil()
+  end)
+
+  it("should reject non-boolean ide_name.context", function()
+    local success, _ = pcall(function()
+      config.apply({ ide_name = { context = "yes" } })
+    end)
+    expect(success).to_be_false()
+  end)
+
+  it("should default terminal_filter_pattern to the claude terminal pattern", function()
+    expect(config.apply({}).terminal_filter_pattern).to_be("^term://.*claude")
+    expect(config.apply({ terminal_filter_pattern = false }).terminal_filter_pattern).to_be(false)
+  end)
+
+  it("should reject a malformed terminal_filter_pattern", function()
+    local success, _ = pcall(function()
+      config.apply({ terminal_filter_pattern = "[" })
+    end)
+    expect(success).to_be_false()
+  end)
+
+  it("should keep the IDE server on loopback by default", function()
+    expect(config.apply({}).bind_address).to_be("127.0.0.1")
+  end)
+
+  it("should accept IPv4 and IPv6 bind addresses", function()
+    for _, addr in ipairs({ "0.0.0.0", "172.17.0.1", "::1", "::" }) do
+      expect(config.apply({ bind_address = addr }).bind_address).to_be(addr)
+    end
+  end)
+
+  it("should reject hostnames and malformed bind addresses", function()
+    for _, addr in ipairs({ "localhost", "999.0.0.1", "1.2.3", 127 }) do
+      local success, _ = pcall(function()
+        config.apply({ bind_address = addr })
+      end)
+      expect(success).to_be_false()
+    end
+  end)
+
   it("should accept valid auto_resize_terminal configuration", function()
     local user_config = {
       port_range = { min = 10000, max = 65535 },
@@ -367,6 +411,12 @@ describe("Configuration", function()
 
     expect(success).to_be_false()
     expect(tostring(err)).to_match("must be a string or function")
+  end)
+
+  it("rejects non-boolean tui_keymaps", function()
+    assert.has_error(function()
+      config.apply({ terminal = { tui_keymaps = "yes" } })
+    end)
   end)
 
   teardown()

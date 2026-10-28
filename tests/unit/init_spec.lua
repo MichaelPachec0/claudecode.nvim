@@ -237,7 +237,16 @@ describe("claudecode.init", function()
       assert(#vim.api.nvim_create_augroup.calls > 0, "nvim_create_augroup was not called")
       assert(#vim.api.nvim_create_autocmd.calls > 0, "nvim_create_autocmd was not called")
 
-      assert(vim.api.nvim_create_autocmd.calls[1].vals[1] == "VimLeavePre", "Expected VimLeavePre event")
+      -- Terminal setup registers its own autocmds first, so look the event up
+      -- rather than assuming it is the first registration.
+      local found = false
+      for _, call in ipairs(vim.api.nvim_create_autocmd.calls) do
+        if call.vals[1] == "VimLeavePre" then
+          found = true
+          break
+        end
+      end
+      assert(found, "Expected VimLeavePre event")
     end)
   end)
 
@@ -274,8 +283,14 @@ describe("claudecode.init", function()
       local claudecode = require("claudecode")
       claudecode.setup({ auto_start = false })
 
-      local opts = vim.api.nvim_create_autocmd.calls[1].vals[2]
-      local callback_fn = opts.callback
+      local callback_fn = nil
+      for _, call in ipairs(vim.api.nvim_create_autocmd.calls) do
+        if call.vals[1] == "VimLeavePre" then
+          callback_fn = call.vals[2].callback
+          break
+        end
+      end
+      assert(callback_fn, "Callback for VimLeavePre not found")
 
       mock_server.stop.calls = {}
       mock_lockfile.remove.calls = {}
@@ -286,6 +301,80 @@ describe("claudecode.init", function()
 
       assert(#mock_server.stop.calls == 0, "Server stop was called unexpectedly")
       assert(#mock_lockfile.remove.calls == 0, "Lockfile remove was called unexpectedly")
+    end)
+  end)
+
+  describe("TabClosed lifecycle (D8)", function()
+    local session_manager
+    local tab_registry
+    local valid_tabs
+    local saved_schedule
+
+    local function tab_closed_callback()
+      for _, call in ipairs(vim.api.nvim_create_autocmd.calls) do
+        if
+          call.vals[1] == "TabClosed"
+          and call.vals[2]
+          and call.vals[2].desc
+          and call.vals[2].desc:match("Claude Code sessions")
+        then
+          return call.vals[2].callback
+        end
+      end
+    end
+
+    before_each(function()
+      saved_schedule = vim.schedule
+      vim.schedule = function(fn)
+        fn()
+      end
+      valid_tabs = { [1] = true, [2] = true }
+      vim.api.nvim_get_current_tabpage = function()
+        return 1
+      end
+      vim.api.nvim_tabpage_is_valid = function(tab)
+        return valid_tabs[tab] == true
+      end
+      session_manager = require("claudecode.session")
+      tab_registry = require("claudecode.tab_registry")
+      session_manager.reset()
+      tab_registry.reset()
+    end)
+
+    after_each(function()
+      vim.schedule = saved_schedule
+      session_manager.reset()
+      tab_registry.reset()
+    end)
+
+    it("re-homes a closed tab's sessions into the landing tab (per_tab_sessions = true)", function()
+      local claudecode = require("claudecode")
+      claudecode.setup({ auto_start = false })
+      tab_registry.set_per_tab_enabled(true)
+      local sid = session_manager.create_session()
+      tab_registry.bind(2, sid)
+
+      valid_tabs[2] = nil -- the user closed tab 2 and landed in tab 1
+      local cb = tab_closed_callback()
+      assert(cb, "TabClosed callback not registered")
+      cb()
+
+      -- Claude survives the tab close and is reachable from the landing tab.
+      assert.is_not_nil(session_manager.get_session(sid))
+      assert.are.equal(1, tab_registry.tab_for_session(sid))
+      assert.are.equal(sid, tab_registry.session_for_tab(1))
+    end)
+
+    it("never destroys shared sessions (per_tab_sessions = false)", function()
+      local claudecode = require("claudecode")
+      claudecode.setup({ auto_start = false })
+      local sid = session_manager.create_session()
+
+      valid_tabs[2] = nil
+      tab_closed_callback()()
+
+      assert.is_not_nil(session_manager.get_session(sid))
+      assert.are.equal(1, session_manager.get_session_count())
     end)
   end)
 

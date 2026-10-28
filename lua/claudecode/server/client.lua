@@ -11,6 +11,7 @@ local M = {}
 ---@field state string Connection state: "connecting", "connected", "closing", "closed"
 ---@field buffer string Incoming data buffer
 ---@field handshake_complete boolean Whether WebSocket handshake is complete
+---@field on_open fun(client: WebSocketClient)|nil Called once when the authenticated handshake completes
 ---@field last_ping number Timestamp of last ping sent
 ---@field last_pong number Timestamp of last pong received
 
@@ -97,6 +98,9 @@ function M.process_data(client, data, on_message, on_close, on_error, auth_token
           client.state = "connected"
           client.buffer = remaining
           logger.debug("client", "WebSocket connection established for client:", client.id)
+          if client.on_open then
+            client.on_open(client)
+          end
 
           if #client.buffer > 0 then
             M.process_data(client, "", on_message, on_close, on_error, auth_token)
@@ -105,7 +109,11 @@ function M.process_data(client, data, on_message, on_close, on_error, auth_token
           client.state = "closing"
           logger.debug("client", "Closing connection for client due to failed handshake:", client.id)
           vim.schedule(function()
-            client.tcp_handle:close()
+            -- The peer usually hangs up as soon as it reads the error response, and
+            -- tcp.lua's EOF teardown closes the handle before this runs.
+            if not client.tcp_handle:is_closing() then
+              client.tcp_handle:close()
+            end
           end)
         end
       end)

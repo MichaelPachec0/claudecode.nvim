@@ -398,6 +398,16 @@ describe("claudecode.terminal (wrapper for Snacks.nvim)", function()
       vim.notify:was_called_with(spy.matching.string.match("Invalid value for split_side"), vim.log.levels.WARN)
     end)
 
+    it("should accept top and bottom split_side", function()
+      terminal_wrapper.setup({ split_side = "bottom" })
+      terminal_wrapper.open()
+      assert.are.equal("bottom", mock_snacks_provider.open:get_call(1).refs[3].split_side)
+
+      terminal_wrapper.setup({ split_side = "top" })
+      terminal_wrapper.open()
+      assert.are.equal("top", mock_snacks_provider.open:get_call(2).refs[3].split_side)
+    end)
+
     it("should ignore invalid split_width_percentage and use default", function()
       terminal_wrapper.setup({ split_side = "left", split_width_percentage = 2.0 })
       terminal_wrapper.open()
@@ -1021,6 +1031,61 @@ describe("claudecode.terminal (wrapper for Snacks.nvim)", function()
         assert.is_table(toggle_call.refs[2]) -- env_table
         assert.is_table(toggle_call.refs[3]) -- effective_config
       end)
+
+      it("should forward split_navigation in the effective_config given to providers", function()
+        local function make_provider(open_spy)
+          return {
+            setup = spy.new(function() end),
+            open = open_spy,
+            close = spy.new(function() end),
+            simple_toggle = spy.new(function() end),
+            focus_toggle = spy.new(function() end),
+            get_active_bufnr = spy.new(function()
+              return 123
+            end),
+            is_available = spy.new(function()
+              return true
+            end),
+          }
+        end
+
+        -- Default (false, Task 9: opt-in) reaches the provider, so Snacks stays
+        -- off by default too.
+        local open_default = spy.new(function() end)
+        terminal_wrapper.setup({ provider = make_provider(open_default) })
+        terminal_wrapper.open({}, nil)
+        assert.is_false(open_default:get_call(1).refs[3].split_navigation)
+
+        -- An explicit true is forwarded as well (opt-in).
+        local open_on = spy.new(function() end)
+        terminal_wrapper.setup({ provider = make_provider(open_on), split_navigation = true })
+        terminal_wrapper.open({}, nil)
+        assert.is_true(open_on:get_call(1).refs[3].split_navigation)
+      end)
+
+      it("should forward the tabs config in the effective_config (M2: Snacks tab-bar title)", function()
+        local open_spy = spy.new(function() end)
+        terminal_wrapper.setup({
+          provider = {
+            setup = spy.new(function() end),
+            open = open_spy,
+            close = spy.new(function() end),
+            simple_toggle = spy.new(function() end),
+            focus_toggle = spy.new(function() end),
+            get_active_bufnr = spy.new(function()
+              return 123
+            end),
+            is_available = spy.new(function()
+              return true
+            end),
+          },
+          tabs = { enabled = true },
+        })
+        terminal_wrapper.open({}, nil)
+        local cfg = open_spy:get_call(1).refs[3]
+        assert.is_table(cfg.tabs)
+        assert.is_true(cfg.tabs.enabled)
+      end)
     end)
 
     describe("fallback behavior", function()
@@ -1170,6 +1235,209 @@ describe("claudecode.terminal (wrapper for Snacks.nvim)", function()
         local bufnr = terminal_wrapper.get_active_terminal_bufnr()
         custom_provider.get_active_bufnr:was_called()
         assert.are.equal(456, bufnr)
+      end)
+
+      it("routes per-tab toggle hides through a provider that owns its windows", function()
+        -- A provider exposing hide_session/get_session_window (Snacks park and
+        -- unpark) must be hidden through the provider, never window_manager.
+        local visible_win = 1000
+        local custom_provider = {
+          setup = spy.new(function() end),
+          open = spy.new(function() end),
+          close = spy.new(function() end),
+          simple_toggle = spy.new(function() end),
+          focus_toggle = spy.new(function() end),
+          get_active_bufnr = spy.new(function()
+            return nil
+          end),
+          is_available = spy.new(function()
+            return true
+          end),
+          open_session = spy.new(function() end),
+          get_session_window = spy.new(function()
+            return visible_win
+          end),
+          hide_session = spy.new(function() end),
+        }
+
+        terminal_wrapper.setup({ provider = custom_provider })
+        local sid = terminal_wrapper.open_new_session()
+        custom_provider.open_session:clear()
+
+        -- Visible -> simple_toggle parks it via the provider.
+        terminal_wrapper.simple_toggle()
+        custom_provider.hide_session:was_called(1)
+        custom_provider.hide_session:was_called_with(sid)
+        custom_provider.open_session:was_not_called()
+
+        -- Parked -> simple_toggle unparks it through open_session, focused
+        -- (upstream simple_toggle focuses the terminal when it shows it).
+        visible_win = nil
+        terminal_wrapper.simple_toggle()
+        custom_provider.open_session:was_called(1)
+        assert.are.equal(sid, custom_provider.open_session:get_call(1).refs[1])
+        assert.is_true(custom_provider.open_session:get_call(1).refs[5])
+
+        -- Visible and focused -> focus_toggle parks it via the provider.
+        visible_win = vim.api.nvim_get_current_win()
+        terminal_wrapper.focus_toggle()
+        custom_provider.hide_session:was_called(2)
+        custom_provider.simple_toggle:was_not_called()
+        custom_provider.focus_toggle:was_not_called()
+      end)
+
+      describe("several sessions in one tab", function()
+        local session_manager
+        local tab_registry
+        local visible -- session_id -> winid for the fake window-owning provider
+        local next_win
+
+        local function base_provider()
+          return {
+            setup = spy.new(function() end),
+            open = spy.new(function() end),
+            close = spy.new(function() end),
+            simple_toggle = spy.new(function() end),
+            focus_toggle = spy.new(function() end),
+            get_active_bufnr = spy.new(function()
+              return nil
+            end),
+            is_available = spy.new(function()
+              return true
+            end),
+          }
+        end
+
+        -- Models Snacks: each session owns a window; showing one parks the rest.
+        local function window_owning_provider()
+          local p = base_provider()
+          local function show_only(sid)
+            for k in pairs(visible) do
+              visible[k] = nil
+            end
+            next_win = next_win + 1
+            visible[sid] = next_win
+          end
+          p.open_session = spy.new(function(sid)
+            show_only(sid)
+          end)
+          p.close_session_keep_window = spy.new(function(_, new_sid)
+            show_only(new_sid)
+          end)
+          p.close_session = spy.new(function(sid)
+            visible[sid] = nil
+          end)
+          p.focus_session = spy.new(function(sid)
+            show_only(sid)
+          end)
+          p.get_session_window = function(sid)
+            return visible[sid]
+          end
+          p.hide_session = spy.new(function(sid)
+            visible[sid] = nil
+          end)
+          return p
+        end
+
+        local function visible_ids()
+          local ids = {}
+          for sid in pairs(visible) do
+            table.insert(ids, sid)
+          end
+          return ids
+        end
+
+        before_each(function()
+          session_manager = require("claudecode.session")
+          tab_registry = require("claudecode.tab_registry")
+          session_manager.reset()
+          tab_registry.reset()
+          visible = {}
+          next_win = 5000
+        end)
+
+        after_each(function()
+          session_manager.reset()
+          tab_registry.reset()
+        end)
+
+        it("closing the active of three sessions keeps the tab pointer on the shown session", function()
+          local provider = window_owning_provider()
+          terminal_wrapper.setup({ provider = provider })
+          terminal_wrapper.open_new_session()
+          terminal_wrapper.open_new_session()
+          local s3 = terminal_wrapper.open_new_session()
+
+          terminal_wrapper.close_session(s3)
+          local shown = visible_ids()
+          assert.are.equal(1, #shown)
+          -- The tab's active pointer follows the session that was unparked.
+          assert.are.equal(shown[1], session_manager.get_active_session_id())
+
+          provider.open_session:clear()
+          -- ensure_visible (send/diff paths) must leave the visible session alone.
+          terminal_wrapper.ensure_visible()
+          provider.open_session:was_not_called()
+          assert.is_not_nil(visible[shown[1]])
+
+          -- :ClaudeCode hides the visible session instead of swapping sessions.
+          terminal_wrapper.simple_toggle()
+          provider.hide_session:was_called_with(shown[1])
+          provider.open_session:was_not_called()
+          assert.are.equal(0, #visible_ids())
+        end)
+
+        it("hides the visible session even when the tab pointer names a parked one", function()
+          local provider = window_owning_provider()
+          terminal_wrapper.setup({ provider = provider })
+          local s1 = terminal_wrapper.open_new_session()
+          terminal_wrapper.open_new_session()
+          local s3 = terminal_wrapper.open_new_session()
+          assert.is_not_nil(visible[s3])
+
+          -- Stale pointer: the registry names s1 while s3 is on screen.
+          tab_registry.set_active(s1)
+          provider.open_session:clear()
+
+          terminal_wrapper.ensure_visible()
+          provider.open_session:was_not_called()
+          assert.is_not_nil(visible[s3])
+
+          terminal_wrapper.simple_toggle()
+          provider.hide_session:was_called_with(s3)
+          provider.open_session:was_not_called()
+          assert.is_nil(visible[s1])
+        end)
+
+        it("simple_toggle shows a window_manager provider's session focused (native)", function()
+          local provider = base_provider()
+          provider.open_session = spy.new(function() end)
+          terminal_wrapper.setup({ provider = provider })
+          local sid = terminal_wrapper.open_new_session()
+          provider.open_session:clear()
+
+          -- No managed window is visible, so the toggle shows the tab's session.
+          terminal_wrapper.simple_toggle()
+          provider.open_session:was_called(1)
+          assert.are.equal(sid, provider.open_session:get_call(1).refs[1])
+          assert.is_true(provider.open_session:get_call(1).refs[5])
+        end)
+
+        it("ensure_visible re-shows a live but hidden native session without focus", function()
+          local provider = base_provider()
+          provider.open_session = spy.new(function() end)
+          terminal_wrapper.setup({ provider = provider })
+          local sid = terminal_wrapper.open_new_session()
+          local bufnr = vim.api.nvim_create_buf(false, true)
+          session_manager.update_terminal_info(sid, { bufnr = bufnr })
+          provider.open_session:clear()
+
+          -- Buffer alive, managed window closed (e.g. hidden by a toggle).
+          terminal_wrapper.ensure_visible()
+          provider.open_session:was_called(1)
+          assert.are.equal(sid, provider.open_session:get_call(1).refs[1])
+          assert.is_false(provider.open_session:get_call(1).refs[5])
+        end)
       end)
 
       it("should handle toggle function (legacy) correctly", function()
@@ -1388,5 +1656,244 @@ describe("claudecode.terminal (wrapper for Snacks.nvim)", function()
       end
       assert.is_true(found_error, "Expected error about missing close function")
     end)
+  end)
+
+  describe("create_smart_esc_handler (3-state machine)", function()
+    local terminal_module
+    local mock_timer
+    local timer_callback
+    local BUFNR = 99
+    local TIMEOUT = 200
+
+    before_each(function()
+      -- Reset module to clear esc_state between tests
+      package.loaded["claudecode.terminal"] = nil
+      -- Ensure vim.uv exists before the module loads (mock may only have vim.loop)
+      vim.uv = vim.uv or {}
+      -- Ensure vim.schedule_wrap exists (module wraps timer callbacks with it)
+      vim.schedule_wrap = vim.schedule_wrap or function(f)
+        return f
+      end
+      terminal_module = require("claudecode.terminal")
+
+      timer_callback = nil
+      mock_timer = {
+        _stopped = false,
+        _stop_calls = 0,
+        _close_calls = 0,
+        start = function(self, timeout, repeat_ms, cb)
+          self._stopped = false
+          timer_callback = cb
+        end,
+        stop = function(self)
+          self._stopped = true
+          self._stop_calls = self._stop_calls + 1
+        end,
+        close = function(self)
+          mock_timer._close_calls = mock_timer._close_calls + 1
+        end,
+      }
+      stub(vim.uv, "new_timer", function()
+        return mock_timer
+      end)
+      stub(vim.fn, "chansend")
+      stub(vim.api, "nvim_feedkeys")
+      stub(vim.api, "nvim_buf_is_valid", function()
+        return true
+      end)
+      -- nvim_replace_termcodes: return the input string unchanged (sufficient for tests)
+      stub(vim.api, "nvim_replace_termcodes", function(s)
+        return s
+      end)
+      -- Provide a fake channel
+      vim.bo = setmetatable({}, {
+        __index = function(_, key)
+          return setmetatable({}, {
+            __index = function()
+              return 42
+            end,
+          })
+        end,
+      })
+    end)
+
+    after_each(function()
+      vim.uv.new_timer:revert()
+      vim.fn.chansend:revert()
+      vim.api.nvim_feedkeys:revert()
+      vim.api.nvim_buf_is_valid:revert()
+      vim.api.nvim_replace_termcodes:revert()
+    end)
+
+    it("single ESC then timeout sends 1x ESC to channel", function()
+      local handler = terminal_module.create_smart_esc_handler(BUFNR, TIMEOUT)
+      handler() -- 1st ESC
+      assert.is_not_nil(timer_callback)
+      timer_callback() -- fire timeout
+      assert.stub(vim.fn.chansend).was_called_with(42, "\027")
+      assert.stub(vim.api.nvim_feedkeys).was_not_called()
+    end)
+
+    it("double ESC then timeout sends 2x ESC atomically", function()
+      local handler = terminal_module.create_smart_esc_handler(BUFNR, TIMEOUT)
+      handler() -- 1st ESC
+      handler() -- 2nd ESC — must restart timer (stop then start)
+      -- Timer must have been stopped before restart (libuv safety requirement)
+      assert.is_true(mock_timer._stop_calls > 0, "timer must be stopped before restart on 2nd ESC")
+      assert.is_not_nil(timer_callback)
+      timer_callback() -- fire timeout
+      assert.stub(vim.fn.chansend).was_called_with(42, "\027\027")
+      assert.stub(vim.api.nvim_feedkeys).was_not_called()
+    end)
+
+    it("triple ESC within timeout exits terminal mode and closes timer", function()
+      local handler = terminal_module.create_smart_esc_handler(BUFNR, TIMEOUT)
+      handler() -- 1st ESC
+      handler() -- 2nd ESC — must NOT exit yet (3-state invariant)
+      assert.equals(
+        0,
+        vim.api.nvim_feedkeys.calls and #vim.api.nvim_feedkeys.calls or 0,
+        "2nd ESC must not exit terminal mode in 3-state machine"
+      )
+      handler() -- 3rd ESC — should exit now
+      assert.is_true(mock_timer._close_calls > 0, "timer must be closed on 3rd ESC")
+      assert.is_true(#vim.api.nvim_feedkeys.calls > 0, "feedkeys must be called on 3rd ESC")
+      assert.equals(0, #vim.fn.chansend.calls, "chansend must not be called")
+    end)
+
+    it("rapid triple ESC exits even if timer callback has not fired", function()
+      local handler = terminal_module.create_smart_esc_handler(BUFNR, TIMEOUT)
+      handler() -- 1st ESC
+      handler() -- 2nd ESC — must NOT exit yet
+      assert.equals(
+        0,
+        vim.api.nvim_feedkeys.calls and #vim.api.nvim_feedkeys.calls or 0,
+        "2nd ESC must not exit terminal mode in 3-state machine"
+      )
+      handler() -- 3rd ESC — exits
+      assert.is_true(#vim.api.nvim_feedkeys.calls > 0, "feedkeys must be called on 3rd ESC")
+      assert.equals(0, #vim.fn.chansend.calls, "chansend must not be called")
+    end)
+
+    it("stale timer callback is a no-op after 3rd ESC advances state", function()
+      local handler = terminal_module.create_smart_esc_handler(BUFNR, TIMEOUT)
+      handler() -- count = 1
+      local stale_callback = timer_callback -- captures count=1 closure before 2nd press overwrites it
+      handler() -- count = 2, restarts timer
+      handler() -- count = 3, exits
+      -- Now fire the stale count=1 callback — should do nothing extra
+      stale_callback()
+      -- feedkeys called once (from 3rd press), chansend not called
+      assert.stub(vim.fn.chansend).was_not_called()
+      assert.stub(vim.api.nvim_feedkeys).was_called(1)
+    end)
+
+    it("ESC then non-ESC key: timeout still fires and sends 1x ESC", function()
+      local handler = terminal_module.create_smart_esc_handler(BUFNR, TIMEOUT)
+      handler() -- 1st ESC
+      -- Non-ESC key does NOT call handler — state stays at count=1
+      timer_callback() -- timeout fires
+      assert.stub(vim.fn.chansend).was_called_with(42, "\027")
+    end)
+
+    it("cleanup_esc_state nils state and stops timer mid-sequence", function()
+      local handler = terminal_module.create_smart_esc_handler(BUFNR, TIMEOUT)
+      handler() -- count = 1
+      terminal_module.cleanup_esc_state(BUFNR)
+      -- Timer should be stopped (and closed)
+      assert.is_true(mock_timer._close_calls > 0, "Expected timer:close() to be called at least once")
+      -- Firing the stale callback after cleanup should not crash or send ESC
+      if timer_callback then
+        assert.has_no.errors(function()
+          timer_callback()
+        end)
+      end
+      assert.stub(vim.fn.chansend).was_not_called()
+    end)
+
+    it("Path 2 (esc_timeout=0) double-ESC keymap is unchanged", function()
+      -- setup_terminal_keymaps with esc_timeout=0 should bind exit_terminal directly
+      local set_calls = {}
+      stub(vim.keymap, "set", function(mode, lhs, rhs, opts)
+        table.insert(set_calls, { mode = mode, lhs = lhs, rhs = rhs })
+      end)
+      terminal_module.setup_terminal_keymaps(BUFNR, {
+        esc_timeout = 0,
+        keymaps = { exit_terminal = "<Esc><Esc>" },
+        split_navigation = false,
+      })
+      vim.keymap.set:revert()
+      assert.equals(1, #set_calls)
+      assert.equals("t", set_calls[1].mode)
+      assert.equals("<Esc><Esc>", set_calls[1].lhs)
+      assert.equals("<C-\\><C-n>", set_calls[1].rhs)
+    end)
+  end)
+end)
+
+-- Task 9: opt-in defaults for #164's terminal-buffer keymaps (D1, D2). This
+-- describe block is intentionally a sibling of the top-level describe above
+-- (not nested inside it): that describe shadows the busted global `spy` with
+-- a hand-rolled fake (see its `before_each`), which is not compatible with
+-- assert.spy()/match. Staying outside its lexical scope keeps the real
+-- busted spy/match/assert available here.
+describe("claudecode.terminal opt-in keymaps defaults (Task 9)", function()
+  local terminal
+
+  before_each(function()
+    -- The top-level describe above tears down _G.vim to nil in its own
+    -- after_each; (re)establish the shared mock for this sibling describe.
+    _G.vim = require("tests.mocks.vim")
+    if _G.vim._mock and _G.vim._mock.reset then
+      _G.vim._mock.reset()
+    end
+    package.loaded["claudecode.terminal"] = nil
+    terminal = require("claudecode.terminal")
+    stub(vim.api, "nvim_buf_is_valid", function()
+      return true
+    end)
+  end)
+
+  after_each(function()
+    vim.api.nvim_buf_is_valid:revert()
+    _G.vim = nil
+  end)
+
+  it("installs no terminal-buffer keymaps with default config", function()
+    local set = spy.on(vim.keymap, "set")
+    terminal.setup_terminal_keymaps(12, terminal.defaults)
+    terminal.setup_scroll_keymaps(12, terminal.defaults)
+    assert.spy(set).was_not_called()
+    set:revert()
+  end)
+
+  it("installs smart ESC only when esc_timeout > 0", function()
+    local set = spy.on(vim.keymap, "set")
+    terminal.setup_terminal_keymaps(12, vim.tbl_extend("force", terminal.defaults, { esc_timeout = 200 }))
+    assert.spy(set).was_called_with("t", "<Esc>", match._, match._)
+    set:revert()
+  end)
+
+  it("installs the scroll/mouse remaps only when tui_keymaps is true", function()
+    local set = spy.on(vim.keymap, "set")
+    terminal.setup_scroll_keymaps(12, vim.tbl_extend("force", terminal.defaults, { tui_keymaps = true }))
+    assert.spy(set).was_called()
+    set:revert()
+  end)
+
+  it("installs split navigation only when split_navigation is true", function()
+    local set = spy.on(vim.keymap, "set")
+    terminal.setup_terminal_keymaps(12, vim.tbl_extend("force", terminal.defaults, { split_navigation = true }))
+    assert.spy(set).was_called_with("t", "<C-h>", match._, match._)
+    assert.spy(set).was_called_with("n", "<C-h>", match._, match._)
+    set:revert()
+  end)
+
+  it("treats a missing split_navigation (nil) as off (M3)", function()
+    local set = spy.on(vim.keymap, "set")
+    -- e.g. a custom config table that never mentions the option
+    terminal.setup_terminal_keymaps(12, { esc_timeout = 0, keymaps = {} })
+    assert.spy(set).was_not_called()
+    set:revert()
   end)
 end)

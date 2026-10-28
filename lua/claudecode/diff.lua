@@ -39,14 +39,16 @@ local function get_autocmd_group()
   return autocmd_group
 end
 
----Resolve the terminal split-width percentage for the current context.
+---Resolve the terminal split-size fraction for the current context. The value
+---is applied to `vim.o.columns` for left/right splits and to `vim.o.lines` for
+---top/bottom splits (the config keys keep the historical "width" label).
 ---While a diff is active, an optional `terminal.diff_split_width_percentage`
 ---(a number in the open interval (0, 1)) takes precedence so the Claude
 ---terminal can shrink to give the diff more room. It falls back to the idle
 ---`terminal.split_width_percentage`, then to the 0.30 default.
 ---@param when "diff"|"idle" Whether a diff is currently active or being torn down
----@return number percentage A width fraction in (0, 1)
-local function resolve_split_width_percentage(when)
+---@return number fraction A size fraction in (0, 1)
+local function resolve_terminal_split_fraction(when)
   local terminal_config = (config and config.terminal) or {}
 
   local idle = terminal_config.split_width_percentage
@@ -58,17 +60,17 @@ local function resolve_split_width_percentage(when)
     -- Defensively validate here too: config.apply does not validate terminal
     -- sub-keys, so this is the authoritative guard for the value we consume.
     -- (terminal.setup additionally warns the user on a bad value at setup time.)
-    local diff_pct = terminal_config.diff_split_width_percentage
-    if type(diff_pct) == "number" and diff_pct > 0 and diff_pct < 1 then
-      return diff_pct
+    local diff_fraction = terminal_config.diff_split_width_percentage
+    if type(diff_fraction) == "number" and diff_fraction > 0 and diff_fraction < 1 then
+      return diff_fraction
     end
   end
 
   return idle
 end
 
--- Exposed for testing the diff/idle width resolution logic.
-M._resolve_split_width_percentage = resolve_split_width_percentage
+-- Exposed for testing the diff/idle size fraction resolution logic.
+M._resolve_terminal_split_fraction = resolve_terminal_split_fraction
 
 ---Whether the plugin should manage (resize) the Claude terminal width across the
 ---diff lifecycle. Controlled by `diff_opts.auto_resize_terminal` (default true).
@@ -102,8 +104,13 @@ local function resize_terminal_for_diff(win, when)
   if win_config.relative and win_config.relative ~= "" then
     return -- floating terminals control their own sizing
   end
-  local split_width = resolve_split_width_percentage(when)
-  pcall(vim.api.nvim_win_set_width, win, math.floor(vim.o.columns * split_width))
+  local fraction = resolve_terminal_split_fraction(when)
+  local split_side = (config and config.terminal and config.terminal.split_side) or "right"
+  if split_side == "top" or split_side == "bottom" then
+    pcall(vim.api.nvim_win_set_height, win, math.floor(vim.o.lines * fraction))
+  else
+    pcall(vim.api.nvim_win_set_width, win, math.floor(vim.o.columns * fraction))
+  end
 end
 
 -- Exposed for testing the gate + floating-skip + resize behavior.
@@ -377,15 +384,13 @@ local function display_terminal_in_new_tab()
     return original_tab, nil, had_terminal_in_original, new_tab
   end
 
-  vim.cmd("vsplit")
+  local horizontal = split_side == "top" or split_side == "bottom"
+  vim.cmd(horizontal and "split" or "vsplit")
 
   local terminal_win = vim.api.nvim_get_current_win()
 
-  if split_side == "left" then
-    vim.cmd("wincmd H")
-  else
-    vim.cmd("wincmd L")
-  end
+  local move_cmd = ({ left = "H", right = "L", top = "K", bottom = "J" })[split_side] or "L"
+  vim.cmd("wincmd " .. move_cmd)
 
   vim.api.nvim_win_set_buf(terminal_win, terminal_bufnr)
 
@@ -410,7 +415,8 @@ local function display_terminal_in_new_tab()
   -- Size the terminal for the diff (unless the user opted out via auto_resize_terminal).
   resize_terminal_for_diff(terminal_win, "diff")
 
-  vim.cmd("wincmd " .. (split_side == "right" and "h" or "l"))
+  local jump_cmd = ({ left = "l", right = "h", top = "j", bottom = "k" })[split_side] or "h"
+  vim.cmd("wincmd " .. jump_cmd)
 
   return original_tab, terminal_win, had_terminal_in_original, new_tab
 end
@@ -1245,7 +1251,19 @@ function M._cleanup_diff_state(tab_name, reason)
 
     -- After closing the diff in the same tab, restore the idle terminal width
     -- (unless the user opted out via auto_resize_terminal). Floating terminals are skipped.
-    resize_terminal_for_diff(find_claudecode_terminal_window(), "idle")
+    local terminal_win = find_claudecode_terminal_window()
+    resize_terminal_for_diff(terminal_win, "idle")
+
+    -- Closing the diff windows above leaves Neovim to pick whatever window it
+    -- considers "next" (often whatever else happens to be adjacent in the
+    -- split tree), not necessarily the Claude terminal. When keep_terminal_focus
+    -- is set, honor it here too (it otherwise only applies at diff-open time)
+    -- and explicitly refocus the terminal.
+    if config and config.diff_opts and config.diff_opts.keep_terminal_focus then
+      if terminal_win and vim.api.nvim_win_is_valid(terminal_win) then
+        pcall(vim.api.nvim_set_current_win, terminal_win)
+      end
+    end
   end
 
   -- ALWAYS clean up buffers regardless of tab mode (fixes buffer leak)
@@ -1803,10 +1821,57 @@ function M.reload_file_buffers_manual(file_path, original_cursor_pos)
   return reload_file_buffers(file_path, original_cursor_pos)
 end
 
+-- Restore focus to the Claude terminal after a user-initiated resolve, when configured.
+local function restore_terminal_focus_after_user_resolve()
+  if not (config and config.diff_opts and config.diff_opts.keep_terminal_focus) then
+    return
+  end
+  local terminal_win = find_claudecode_terminal_window()
+  if terminal_win and vim.api.nvim_win_is_valid(terminal_win) then
+    pcall(vim.api.nvim_set_current_win, terminal_win)
+    pcall(vim.cmd, "startinsert")
+  end
+end
+
+---Finds the diff buffer a user command should act on: the current buffer when
+---it is a Claude diff, otherwise the one Claude diff shown in the current tab
+---(so :ClaudeCodeDiffAccept/Deny also work from the terminal split or the
+---original-file side). Two different diffs in the tab is ambiguous: nil + reason.
+---@return integer|nil bufnr
+---@return string|nil err Warning to show when no buffer is returned
+local function find_user_diff_buffer()
+  local current = vim.api.nvim_get_current_buf()
+  if vim.b[current].claudecode_diff_tab_name or vim.b[current].claudecode_inline_diff then
+    return current
+  end
+  local found, found_tab_name
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local buf = vim.api.nvim_win_get_buf(win)
+    local tab_name = vim.b[buf].claudecode_diff_tab_name
+    if tab_name then
+      if found_tab_name and tab_name ~= found_tab_name then
+        return nil, "Several Claude diffs are open in this tab; run the command from the diff you mean"
+      end
+      found, found_tab_name = buf, tab_name
+    end
+  end
+  if not found then
+    return nil, "No active diff found in current tab"
+  end
+  return found
+end
+
 ---Accept the current diff (user command version)
----This function reads the diff context from buffer variables
+---This function reads the diff context from buffer variables of the current
+---buffer, or of the only Claude diff in the current tab (see find_user_diff_buffer).
+---Unlike Claude-initiated resolve (which waits for the close_tab MCP tool call),
+---user commands clean up the diff UI immediately since close_tab is internal-only.
 function M.accept_current_diff()
-  local current_buffer = vim.api.nvim_get_current_buf()
+  local current_buffer, find_err = find_user_diff_buffer()
+  if not current_buffer then
+    vim.notify(find_err, vim.log.levels.WARN)
+    return
+  end
 
   -- Check for inline diff buffer first
   if vim.b[current_buffer].claudecode_inline_diff then
@@ -1827,12 +1892,21 @@ function M.accept_current_diff()
   end
 
   M._resolve_diff_as_saved(tab_name, current_buffer)
+  M._cleanup_diff_state(tab_name, "accepted via :ClaudeCodeDiffAccept")
+  restore_terminal_focus_after_user_resolve()
 end
 
 ---Deny/reject the current diff (user command version)
----This function reads the diff context from buffer variables
+---This function reads the diff context from buffer variables of the current
+---buffer, or of the only Claude diff in the current tab (see find_user_diff_buffer).
+---Unlike Claude-initiated resolve (which waits for the close_tab MCP tool call),
+---user commands clean up the diff UI immediately since close_tab is internal-only.
 function M.deny_current_diff()
-  local current_buffer = vim.api.nvim_get_current_buf()
+  local current_buffer, find_err = find_user_diff_buffer()
+  if not current_buffer then
+    vim.notify(find_err, vim.log.levels.WARN)
+    return
+  end
 
   -- Check for inline diff buffer first
   if vim.b[current_buffer].claudecode_inline_diff then
@@ -1852,8 +1926,9 @@ function M.deny_current_diff()
     return
   end
 
-  -- Do not close windows/tabs here; just mark as rejected.
   M._resolve_diff_as_rejected(tab_name)
+  M._cleanup_diff_state(tab_name, "rejected via :ClaudeCodeDiffDeny")
+  restore_terminal_focus_after_user_resolve()
 end
 
 -- Expose internal utilities for use by diff_inline.lua

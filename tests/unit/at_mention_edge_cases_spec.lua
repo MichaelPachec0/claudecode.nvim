@@ -326,4 +326,42 @@ describe("At Mention Edge Cases", function()
       assert_contains(result, "file.lua")
     end)
   end)
+
+  describe("base directory", function()
+    it("makes paths relative to the given base instead of Neovim's cwd", function()
+      mock_vim.fn.filereadable = function(path)
+        return path == "/git/repo/src/main.lua" and 1 or 0
+      end
+      expect(init_module._format_path_for_at_mention("/git/repo/src/main.lua")).to_be("/git/repo/src/main.lua")
+      expect(init_module._format_path_for_at_mention("/git/repo/src/main.lua", "/git/repo")).to_be("src/main.lua")
+    end)
+
+    it("formats directories against the base, including the base itself", function()
+      mock_vim.fn.filereadable = function()
+        return 0
+      end
+      mock_vim.fn.isdirectory = function(path)
+        return (path == "/git/repo" or path == "/git/repo/src") and 1 or 0
+      end
+      expect(init_module._format_path_for_at_mention("/git/repo/src", "/git/repo")).to_be("src/")
+      expect(init_module._format_path_for_at_mention("/git/repo", "/git/repo")).to_be("./")
+    end)
+
+    it("keeps a sibling directory sharing the base's prefix absolute", function()
+      -- "/Users/test/project-other" starts with "/Users/test/project" but is not inside it.
+      mock_vim.fn.filereadable = function(path)
+        return path == "/Users/test/project-other/x.lua" and 1 or 0
+      end
+      expect(init_module._format_path_for_at_mention("/Users/test/project-other/x.lua")).to_be(
+        "/Users/test/project-other/x.lua"
+      )
+    end)
+
+    it("tolerates a trailing slash on the base", function()
+      mock_vim.fn.filereadable = function(path)
+        return path == "/git/repo/a.lua" and 1 or 0
+      end
+      expect(init_module._format_path_for_at_mention("/git/repo/a.lua", "/git/repo/")).to_be("a.lua")
+    end)
+  end)
 end)

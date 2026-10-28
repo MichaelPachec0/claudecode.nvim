@@ -37,7 +37,7 @@
 ---@alias ClaudeCodeNewFileRejectBehavior "keep_empty"|"close_window"
 
 -- Terminal split side positioning
----@alias ClaudeCodeSplitSide "left"|"right"
+---@alias ClaudeCodeSplitSide "left"|"right"|"top"|"bottom"
 
 -- In-tree terminal provider names
 ---@alias ClaudeCodeTerminalProviderName "auto"|"snacks"|"native"|"external"|"none"
@@ -102,6 +102,10 @@
 ---@field git_repo_cwd boolean|nil      -- use git root of current file/cwd as working directory
 ---@field cwd_provider? ClaudeCodeCwdProvider -- custom function to compute working directory
 ---@field fix_streamed_paste boolean|"auto"|nil -- work around Neovim <0.12.2 terminal paste fragmentation (#161); "auto" (default) enables only on affected versions
+---@field per_tab_sessions boolean? -- true: each tabpage owns its own Claude sessions; false (default): one shared session set across tabpages (upstream behavior)
+---@field split_navigation boolean? -- enable Ctrl+h/j/k/l to navigate splits from terminal mode; false (default): upstream behavior, no split-navigation keymaps
+---@field tui_keymaps boolean? -- master switch for the TUI scroll/mouse remaps installed by setup_scroll_keymaps; false (default): none installed (upstream behavior)
+---@field scroll_up_enabled boolean? -- only consulted when tui_keymaps is true; true: exit terminal mode on scroll to browse Neovim scrollback; false (default): guarded scroll keymaps forward wheel events to the Claude Code TUI
 
 -- Port range configuration
 ---@class ClaudeCodePortRange
@@ -118,6 +122,7 @@
 -- Main configuration structure
 ---@class ClaudeCodeConfig
 ---@field port_range ClaudeCodePortRange
+---@field bind_address string? IP address the IDE server listens on (default "127.0.0.1")
 ---@field auto_start boolean
 ---@field terminal_cmd string|nil
 ---@field env table<string, string>
@@ -133,6 +138,14 @@
 ---@field disable_broadcast_debouncing? boolean
 ---@field enable_broadcast_debouncing_in_tests? boolean
 ---@field terminal ClaudeCodeTerminalConfig?
+---@field ide_name ClaudeCodeIdeNameConfig?
+---@field terminal_filter_pattern string|false? Lua pattern for terminal buffer names selection tracking ignores
+
+-- Label the Claude CLI shows for this instance in its /ide picker
+---@class ClaudeCodeIdeNameConfig
+---@field override string? Use this exact label
+---@field context boolean? Append "[tmux:session:window]" or "[~/cwd]" to "Neovim" (default false)
+---@field tmux_include_pane boolean? With context in tmux, also append the pane index
 
 ---@class (partial) PartialClaudeCodeConfig: ClaudeCodeConfig
 

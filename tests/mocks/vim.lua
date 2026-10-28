@@ -119,7 +119,15 @@ local vim = {
     end,
 
     nvim_get_current_buf = function()
-      return 1
+      -- Defaults to buffer 1; specs can switch it via nvim_set_current_buf.
+      return vim._current_buf or 1
+    end,
+
+    nvim_set_current_buf = function(bufnr)
+      vim._current_buf = bufnr
+      if vim._windows[vim._current_window] then
+        vim._windows[vim._current_window].buf = bufnr
+      end
     end,
 
     nvim_buf_get_name = function(bufnr)
@@ -392,18 +400,6 @@ local vim = {
       return {}
     end,
 
-    nvim_win_get_option = function(winid, name)
-      -- Window-local options (e.g. 'diff'). Default to false so a window is not
-      -- treated as a diff window unless a test explicitly sets it.
-      if vim._windows[winid] and vim._windows[winid].options then
-        local value = vim._windows[winid].options[name]
-        if value ~= nil then
-          return value
-        end
-      end
-      return false
-    end,
-
     nvim_win_set_option = function(winid, name, value)
       if vim._windows[winid] then
         if not vim._windows[winid].options then
@@ -425,11 +421,6 @@ local vim = {
 
     nvim_get_current_tabpage = function()
       return vim._current_tabpage
-    end,
-
-    nvim_tabpage_list_wins = function(tabpage)
-      local tab = (tabpage == nil or tabpage == 0) and vim._current_tabpage or tabpage
-      return vim._tab_windows[tab] or {}
     end,
 
     nvim_set_current_tabpage = function(tab)
@@ -1223,6 +1214,7 @@ vim._mock = {
     vim._namespaces = {}
     vim._next_ns_id = 1
     vim._highlights = {}
+    vim._current_buf = nil
   end,
 }
 

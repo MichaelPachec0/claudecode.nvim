@@ -97,7 +97,8 @@ describe("TCP server disconnect handling", function()
     -- a string => fail with that message (return nil, msg).
     local function make_handle(records, bind_result, listen_result)
       local handle = { closed = false }
-      handle.bind = function(_, _host, port)
+      handle.bind = function(_, host, port)
+        handle.bound_host = host
         handle.bound_port = port
         if bind_result == true then
           return 0
@@ -164,6 +165,38 @@ describe("TCP server disconnect handling", function()
       end
     end)
 
+    it("binds to 127.0.0.1 by default and to config.bind_address when set", function()
+      local handles = {}
+      vim.loop.new_tcp = new_tcp_from_specs(handles, {})
+
+      local default_server = tcp.create_server({ port_range = { min = 10000, max = 10000 } }, {}, nil)
+      local custom_server = tcp.create_server(
+        { port_range = { min = 10000, max = 10000 }, bind_address = "172.17.0.1" },
+        {},
+        nil
+      )
+
+      assert.are.equal("127.0.0.1", handles[1].bound_host)
+      assert.are.equal("127.0.0.1", default_server.bind_address)
+      assert.are.equal("172.17.0.1", handles[2].bound_host)
+      assert.are.equal("172.17.0.1", custom_server.bind_address)
+    end)
+
+    it("warns only when listening on a non-loopback address", function()
+      local warnings = {}
+      local warn_stub = require("luassert.stub")(require("claudecode.logger"), "warn", function(_, msg)
+        table.insert(warnings, msg)
+      end)
+      vim.loop.new_tcp = new_tcp_from_specs({}, {})
+
+      tcp.create_server({ port_range = { min = 10000, max = 10000 }, bind_address = "127.0.0.1" }, {}, nil)
+      tcp.create_server({ port_range = { min = 10000, max = 10000 }, bind_address = "0.0.0.0" }, {}, nil)
+      warn_stub:revert()
+
+      assert.are.equal(1, #warnings)
+      assert.is_truthy(warnings[1]:find("0.0.0.0:10000", 1, true))
+    end)
+
     it("treats bind-success-but-listen-EADDRINUSE as unavailable", function()
       local handles = {}
       vim.loop.new_tcp = function()
@@ -208,8 +241,9 @@ describe("TCP server disconnect handling", function()
 
     tcp._handle_new_connection(server)
 
-    assert.spy(callbacks.on_connect).was_called(1)
-    local client = callbacks.on_connect.calls[1].vals[1]
+    -- on_connect waits for the authenticated handshake; a bare accept is not a connection.
+    assert.spy(callbacks.on_connect).was_not_called()
+    local _, client = next(server.clients)
     assert.is_table(client)
     assert.is_table(client.tcp_handle)
     assert.is_function(client.tcp_handle._read_cb)
@@ -221,6 +255,68 @@ describe("TCP server disconnect handling", function()
     assert.spy(callbacks.on_disconnect).was_called_with(client, 1006, "EOF")
     expect(server.clients[client.id]).to_be_nil()
   end)
+
+  -- A client that dies without a Close frame shows up as a read error, but it is a
+  -- normal disconnect and must not reach on_error (#316). Stream callbacks currently
+  -- pass the bare error name; luv also formats errors as "NAME: message".
+  for _, err in ipairs({
+    "ECONNRESET",
+    "ECONNRESET: connection reset by peer",
+    "ECONNABORTED",
+    "ECONNABORTED: software caused connection abort",
+  }) do
+    it("should disconnect without on_error when the peer resets the connection (" .. err .. ")", function()
+      local callbacks = {
+        on_message = spy.new(function() end),
+        on_connect = spy.new(function() end),
+        on_disconnect = spy.new(function() end),
+        on_error = spy.new(function() end),
+      }
+
+      local config = { port_range = { min = 10000, max = 10000 } }
+      local server, create_err = tcp.create_server(config, callbacks, nil)
+      assert.is_nil(create_err)
+      assert.is_table(server)
+
+      tcp._handle_new_connection(server)
+
+      local _, client = next(server.clients)
+      client.tcp_handle._read_cb(err, nil)
+
+      assert.spy(callbacks.on_disconnect).was_called(1)
+      assert.spy(callbacks.on_disconnect).was_called_with(client, 1006, err)
+      expect(server.clients[client.id]).to_be_nil()
+
+      assert.spy(callbacks.on_error).was_not_called()
+    end)
+  end
+
+  -- Codes that are not a peer disconnect must keep being reported, in both formats.
+  for _, err in ipairs({ "EPIPE", "ENOTCONN", "ETIMEDOUT", "EHOSTUNREACH: no route to host" }) do
+    it("should still report a genuine read error (" .. err .. ")", function()
+      local callbacks = {
+        on_message = spy.new(function() end),
+        on_connect = spy.new(function() end),
+        on_disconnect = spy.new(function() end),
+        on_error = spy.new(function() end),
+      }
+
+      local config = { port_range = { min = 10000, max = 10000 } }
+      local server, create_err = tcp.create_server(config, callbacks, nil)
+      assert.is_nil(create_err)
+      assert.is_table(server)
+
+      tcp._handle_new_connection(server)
+
+      local _, client = next(server.clients)
+      client.tcp_handle._read_cb(err, nil)
+
+      assert.spy(callbacks.on_error).was_called(1)
+      assert.spy(callbacks.on_error).was_called_with("Client read error: " .. err)
+      assert.spy(callbacks.on_disconnect).was_called(1)
+      expect(server.clients[client.id]).to_be_nil()
+    end)
+  end
 
   it("should call on_disconnect and remove client on TCP read error", function()
     local callbacks = {
@@ -237,7 +333,7 @@ describe("TCP server disconnect handling", function()
 
     tcp._handle_new_connection(server)
 
-    local client = callbacks.on_connect.calls[1].vals[1]
+    local _, client = next(server.clients)
     client.tcp_handle._read_cb("boom", nil)
 
     assert.spy(callbacks.on_disconnect).was_called(1)
@@ -267,7 +363,7 @@ describe("TCP server disconnect handling", function()
 
     tcp._handle_new_connection(server)
 
-    local client = callbacks.on_connect.calls[1].vals[1]
+    local _, client = next(server.clients)
     client.tcp_handle._read_cb(nil, "some data")
 
     assert.spy(callbacks.on_disconnect).was_called(1)
@@ -294,7 +390,7 @@ describe("TCP server disconnect handling", function()
 
     tcp._handle_new_connection(server)
 
-    local client = callbacks.on_connect.calls[1].vals[1]
+    local _, client = next(server.clients)
     client.tcp_handle._read_cb(nil, "data")
 
     assert.spy(callbacks.on_disconnect).was_called(1)
@@ -304,5 +400,16 @@ describe("TCP server disconnect handling", function()
     -- Simulate a later EOF after the CLOSE path already removed the client.
     client.tcp_handle._read_cb(nil, nil)
     assert.spy(callbacks.on_disconnect).was_called(1)
+  end)
+
+  describe("is_loopback", function()
+    it("recognizes loopback addresses only", function()
+      for _, addr in ipairs({ "127.0.0.1", "127.1.2.3", "::1", "::ffff:127.0.0.1" }) do
+        assert.is_true(tcp.is_loopback(addr), addr)
+      end
+      for _, addr in ipairs({ "0.0.0.0", "172.17.0.1", "::", "10.0.0.5" }) do
+        assert.is_false(tcp.is_loopback(addr), addr)
+      end
+    end)
   end)
 end)

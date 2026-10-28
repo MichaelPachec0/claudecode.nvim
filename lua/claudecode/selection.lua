@@ -1,8 +1,10 @@
 ---Manages selection tracking and communication with the Claude server.
+---Supports session-aware selection tracking for multi-session environments.
 ---@module 'claudecode.selection'
 local M = {}
 
 local logger = require("claudecode.logger")
+local session_manager = require("claudecode.session")
 local terminal = require("claudecode.terminal")
 
 local uv = vim.uv or vim.loop
@@ -39,6 +41,10 @@ M.state = {
   demotion_timer = nil,
   visual_demotion_delay_ms = 50,
 
+  -- Lua pattern matched against the lowercased buffer name of terminals that
+  -- selection tracking must ignore (false disables name matching).
+  terminal_filter_pattern = "^term://.*claude",
+
   -- Cursor position captured when a visual selection is flushed on visual-mode exit.
   -- Demotion only fires once the cursor actually moves away from this position, so a
   -- held selection persists (see issue #246 and M.flush_visual_selection).
@@ -48,12 +54,13 @@ M.state = {
   -- consumed/mutated the selection (d/c/>/x...) so the flush does not broadcast stale,
   -- post-edit marks as a phantom selection (see M.flush_visual_selection).
   visual_entry = nil,
+  mouse_handler_set = false,
 }
 
 ---Enables selection tracking.
 ---@param server table The server object to use for communication.
 ---@param visual_demotion_delay_ms number The delay for visual selection demotion.
-function M.enable(server, visual_demotion_delay_ms)
+function M.enable(server, visual_demotion_delay_ms, terminal_filter_pattern)
   if M.state.tracking_enabled then
     return
   end
@@ -61,8 +68,12 @@ function M.enable(server, visual_demotion_delay_ms)
   M.state.tracking_enabled = true
   M.server = server
   M.state.visual_demotion_delay_ms = visual_demotion_delay_ms
+  if terminal_filter_pattern ~= nil then
+    M.state.terminal_filter_pattern = terminal_filter_pattern
+  end
 
   M._create_autocommands()
+  M._setup_mouse_handler()
 end
 
 ---Disables selection tracking.
@@ -118,7 +129,7 @@ function M._cancel_demotion_timer()
 end
 
 ---Creates autocommands for tracking selections.
----Sets up listeners for CursorMoved, CursorMovedI, BufEnter, ModeChanged, and TextChanged events.
+---Sets up listeners for CursorMoved, CursorMovedI, BufEnter, WinEnter, ModeChanged, and TextChanged events.
 ---@local
 function M._create_autocommands()
   local group = vim.api.nvim_create_augroup("ClaudeCodeSelection", { clear = true })
@@ -143,6 +154,54 @@ function M._create_autocommands()
       M.on_text_changed()
     end,
   })
+
+  vim.api.nvim_create_autocmd("WinEnter", {
+    group = group,
+    callback = function()
+      M.on_win_enter()
+    end,
+  })
+end
+
+---Sets up mouse event handler for capturing mouse-based selections.
+---Uses vim.on_key to intercept mouse release events which indicate
+---the end of a mouse selection drag.
+---@local
+function M._setup_mouse_handler()
+  if M.state.mouse_handler_set then
+    return
+  end
+
+  -- Check if required APIs are available (they may not be in test environments)
+  if not vim.on_key or not vim.api.nvim_replace_termcodes then
+    return
+  end
+
+  M.state.mouse_handler_set = true
+
+  -- Cache the termcodes for mouse events
+  local left_release = vim.api.nvim_replace_termcodes("<LeftRelease>", true, false, true)
+  local left_drag = vim.api.nvim_replace_termcodes("<LeftDrag>", true, false, true)
+
+  vim.on_key(function(key)
+    -- Only process if tracking is enabled
+    if not M.state.tracking_enabled then
+      return
+    end
+
+    -- LeftRelease indicates end of mouse selection or click
+    -- LeftDrag indicates ongoing mouse selection
+    if key == left_release or key == left_drag then
+      vim.schedule(function()
+        -- Small delay to let Neovim update cursor/selection state
+        vim.defer_fn(function()
+          if M.state.tracking_enabled then
+            M.update_selection()
+          end
+        end, 10)
+      end)
+    end
+  end)
 end
 
 ---Clears the autocommands related to selection tracking.
@@ -187,6 +246,23 @@ function M.on_text_changed()
   M.debounce_update()
 end
 
+---Handles window enter events.
+---Triggers an immediate update to ensure file reference is sent on keyboard navigation.
+---Uses a small delay similar to mouse handler to ensure state is settled.
+function M.on_win_enter()
+  -- Cancel any pending debounce to avoid duplicate updates. Stops AND closes
+  -- the handle: a stopped timer never runs the callback that would close it.
+  M._cancel_debounce_timer()
+
+  -- Use a small delay to ensure window/buffer state is settled
+  -- This mirrors the mouse handler behavior which works reliably
+  vim.defer_fn(function()
+    if M.state.tracking_enabled then
+      M.update_selection()
+    end
+  end, 10)
+end
+
 ---Debounces selection updates.
 ---Ensures that `update_selection` is not called too frequently by deferring
 ---its execution.
@@ -224,6 +300,28 @@ function M.debounce_update()
 end
 
 ---Updates the current selection state.
+---True for buffers selection tracking must ignore: the Claude terminals this
+---plugin created (flagged b:claudecode_terminal, whatever terminal_cmd is
+---called), plus terminals whose lowercased name matches
+---terminal_filter_pattern (default "^term://.*claude"), which also covers
+---Claude running in a terminal another plugin opened (e.g. sidekick.nvim).
+---@param bufnr integer
+---@param buf_name string|nil
+---@return boolean
+local function is_ignored_terminal(bufnr, buf_name)
+  local ok, flagged = pcall(function()
+    return vim.b[bufnr].claudecode_terminal
+  end)
+  if ok and flagged == true then
+    return true
+  end
+  local pattern = M.state.terminal_filter_pattern
+  if not pattern or not buf_name then
+    return false
+  end
+  return buf_name:lower():match(pattern) ~= nil
+end
+
 ---Determines the current selection based on the editor mode (visual or normal)
 ---and sends an update to the server if the selection has changed.
 function M.update_selection()
@@ -234,8 +332,8 @@ function M.update_selection()
   local current_buf = vim.api.nvim_get_current_buf()
   local buf_name = vim.api.nvim_buf_get_name(current_buf)
 
-  -- If the buffer name starts with "term://" and contains "claude", do not update selection
-  if buf_name and buf_name:match("^term://") and buf_name:lower():find("claude", 1, true) then
+  -- Never treat a Claude terminal as an editor selection
+  if is_ignored_terminal(current_buf, buf_name) then
     -- Optionally, cancel demotion timer like for the terminal
     M._cancel_demotion_timer()
     return
@@ -343,6 +441,13 @@ function M.update_selection()
 
   if changed then
     M.state.latest_selection = current_selection
+
+    -- Also update the active session's selection state
+    local active_session_id = session_manager.get_active_session_id()
+    if active_session_id then
+      session_manager.update_selection(active_session_id, current_selection)
+    end
+
     if M.server then
       M.send_selection_update(current_selection)
     end
@@ -708,7 +813,7 @@ function M.flush_visual_selection()
   local current_buf = vim.api.nvim_get_current_buf()
   local buf_name = vim.api.nvim_buf_get_name(current_buf)
 
-  if buf_name and buf_name:match("^term://") and buf_name:lower():find("claude", 1, true) then
+  if is_ignored_terminal(current_buf, buf_name) then
     return
   end
   if terminal then
@@ -809,14 +914,46 @@ function M.has_selection_changed(new_selection)
 end
 
 ---Sends the selection update to the Claude server.
+---Uses session-aware sending if available, otherwise broadcasts to all.
 ---@param selection table The selection object to send.
 function M.send_selection_update(selection)
+  -- Try to send to active session first
+  if M.server.send_to_active_session then
+    local sent = M.server.send_to_active_session("selection_changed", selection)
+    if sent then
+      return
+    end
+  end
+
+  -- Fallback to broadcast
   M.server.broadcast("selection_changed", selection)
 end
 
 ---Gets the latest recorded selection.
 ---@return table|nil The latest selection object, or nil if none recorded.
 function M.get_latest_selection()
+  return M.state.latest_selection
+end
+
+---Gets the selection for a specific session.
+---@param session_id string The session ID
+---@return table|nil The selection object for the session, or nil if none recorded.
+function M.get_session_selection(session_id)
+  return session_manager.get_selection(session_id)
+end
+
+---Gets the selection for the active session.
+---Falls back to global latest_selection if no session-specific selection.
+---@return table|nil The selection object, or nil if none recorded.
+function M.get_active_session_selection()
+  local active_session_id = session_manager.get_active_session_id()
+  if active_session_id then
+    local session_selection = session_manager.get_selection(active_session_id)
+    if session_selection then
+      return session_selection
+    end
+  end
+  -- Fallback to global selection
   return M.state.latest_selection
 end
 
@@ -916,7 +1053,7 @@ function M.send_at_mention_for_visual_selection(line1, line2)
   -- If range parameters are provided, use them (for :'<,'> commands)
   if line1 and line2 then
     sel_to_send = M.get_range_selection(line1, line2)
-    if not sel_to_send or sel_to_send.selection.isEmpty then
+    if not sel_to_send then
       logger.warn("selection", "Invalid range selection to send as at-mention.")
       return false
     end
