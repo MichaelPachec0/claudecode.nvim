@@ -281,6 +281,48 @@ describe("multi-session terminal", function()
     end)
   end
 
+  describe("session working directory", function()
+    local dir_a, dir_b
+
+    before_each(function()
+      dir_a, dir_b = vim.fn.tempname(), vim.fn.tempname()
+      vim.fn.mkdir(dir_a, "p")
+      vim.fn.mkdir(dir_b, "p")
+    end)
+
+    after_each(function()
+      reset_terminals()
+      -- terminal.setup merges into module defaults; "" clears the static cwd so
+      -- later sessions do not try to start in a deleted directory.
+      terminal.setup({ provider = "native", split_side = "right", cwd = "" }, "sh")
+      vim.fn.delete(dir_a, "rf")
+      vim.fn.delete(dir_b, "rf")
+    end)
+
+    ---Real cwd of the active session's shell, read from /proc.
+    local function process_cwd()
+      local job = vim.b[vim.api.nvim_win_get_buf(only_claude_win())].terminal_job_id
+      return vim.loop.fs_realpath("/proc/" .. vim.fn.jobpid(job) .. "/cwd")
+    end
+
+    it("formats sent paths against the directory the active session runs in", function()
+      terminal.setup({ provider = "native", split_side = "right", cwd = dir_a }, "sh")
+      open_session()
+      terminal.setup({ provider = "native", split_side = "right", cwd = dir_b }, "sh")
+      vim.cmd("ClaudeCodeNew")
+
+      assert.are.equal(vim.loop.fs_realpath(dir_b), process_cwd())
+      assert.are.equal(dir_b, terminal.get_active_session_cwd())
+      local main = require("claudecode")
+      vim.fn.writefile({}, dir_b .. "/f.lua") -- real Neovim checks the path exists
+      assert.are.equal("f.lua", main._format_path_for_at_mention(dir_b .. "/f.lua", terminal.get_active_session_cwd()))
+
+      vim.cmd("ClaudeCodeSwitch 1")
+      assert.are.equal(vim.loop.fs_realpath(dir_a), process_cwd())
+      assert.are.equal(dir_a, terminal.get_active_session_cwd())
+    end)
+  end)
+
   describe("visibility events", function()
     local events, autocmd_ids
 

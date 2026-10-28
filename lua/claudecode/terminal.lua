@@ -233,11 +233,13 @@ end
 ---@param bufnr number
 ---@param provider table The terminal provider module
 ---@param cmd_args string|nil Claude CLI arguments the session was launched with
+---@param cwd string|nil Working directory the session's Claude process started in
 ---@return string session_id
-local function finalize_session_terminal(session_id, bufnr, provider, cmd_args)
+local function finalize_session_terminal(session_id, bufnr, provider, cmd_args, cwd)
   local session = session_manager.get_session(session_id)
   if session then
     session.cmd_args = cmd_args
+    session.cwd = cwd
   end
   if bufnr then
     session_manager.update_terminal_info(session_id, { bufnr = bufnr })
@@ -1288,7 +1290,7 @@ local function ensure_terminal_visible_no_focus(opts_override, cmd_args)
     local session_id, newly_created = ensure_current_tab_session()
     provider.open_session(session_id, cmd_string, claude_env_table, effective_config, false)
     if newly_created then
-      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider, cmd_args)
+      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider, cmd_args, effective_config.cwd)
     end
     return true
   end
@@ -1667,7 +1669,7 @@ function M.open(opts_override, cmd_args)
     local session_id, newly_created = ensure_current_tab_session()
     provider.open_session(session_id, cmd_string, claude_env_table, effective_config, true)
     if newly_created then
-      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider, cmd_args)
+      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider, cmd_args, effective_config.cwd)
     end
   else
     -- Legacy / custom provider without per-session support: keep historic behavior.
@@ -1736,7 +1738,7 @@ function M.simple_toggle(opts_override, cmd_args)
     local session_id, newly_created = ensure_current_tab_session()
     provider.open_session(session_id, cmd_string, claude_env_table, effective_config, true)
     if newly_created then
-      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider, cmd_args)
+      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider, cmd_args, effective_config.cwd)
     end
 
     local active_bufnr = provider.get_active_bufnr()
@@ -1832,7 +1834,7 @@ function M.focus_toggle(opts_override, cmd_args)
     end
     provider.open_session(session_id, cmd_string, claude_env_table, effective_config, true)
     if newly_created then
-      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider, cmd_args)
+      finalize_session_terminal(session_id, provider.get_active_bufnr(), provider, cmd_args, effective_config.cwd)
     end
 
     local active_bufnr = provider.get_active_bufnr()
@@ -2061,8 +2063,10 @@ end
 ---@return string session_id The ID of the new session
 function M.open_new_session(opts_override, cmd_args)
   local session_id = session_manager.create_session()
-  session_manager.get_session(session_id).cmd_args = cmd_args
   local effective_config = build_config(opts_override)
+  local new_session = session_manager.get_session(session_id)
+  new_session.cmd_args = cmd_args
+  new_session.cwd = effective_config.cwd
   local cmd_string, claude_env_table = get_claude_command_and_env(cmd_args)
 
   -- Make the new session active immediately and bind it to the current tab.
@@ -2082,6 +2086,20 @@ function M.open_new_session(opts_override, cmd_args)
   end
 
   return session_id
+end
+
+---Working directory of the current tab's active session's Claude process, or
+---nil when no session with a live terminal is active. Paths sent to Claude
+---(@ mentions) are made relative to this, not to Neovim's own cwd, because
+---Claude resolves them from the directory it runs in (terminal.cwd,
+---cwd_provider and git_repo_cwd can all make that differ).
+---@return string|nil
+function M.get_active_session_cwd()
+  local _, sess = current_tab_session()
+  if sess and sess.cwd and sess.terminal_bufnr and vim.api.nvim_buf_is_valid(sess.terminal_bufnr) then
+    return sess.cwd
+  end
+  return nil
 end
 
 ---Closes a specific session.

@@ -17,6 +17,7 @@ local logger = require("claudecode.logger")
 ---@field created_at number Timestamp when session was created
 ---@field seq number Creation sequence number; breaks created_at ties
 ---@field cmd_args string|nil Claude CLI arguments the session's terminal was launched with
+---@field cwd string|nil Working directory the session's Claude process was started in
 ---@field name string|nil Optional display name for the session
 
 ---@type table<string, ClaudeCodeSession>

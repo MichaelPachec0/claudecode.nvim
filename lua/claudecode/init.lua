@@ -1511,11 +1511,29 @@ function M.get_version()
   }
 end
 
+---Returns `path` relative to `base`, or nil when it is not inside `base`. A
+---plain prefix test is not enough: with base "/a/b", "/a/bc/x" shares the
+---prefix but is not inside it. Returns "" when path equals base.
+---@param path string
+---@param base string
+---@return string|nil
+local function relative_to(path, base)
+  base = base:gsub("/+$", "")
+  if path == base then
+    return ""
+  end
+  if base ~= "" and path:sub(1, #base + 1) == base .. "/" then
+    return path:sub(#base + 2)
+  end
+  return nil
+end
+
 ---Format file path for at mention (exposed for testing)
 ---@param file_path string The file path to format
+---@param base_cwd string|nil Directory to make the path relative to (default: Neovim's cwd)
 ---@return string formatted_path The formatted path
 ---@return boolean is_directory Whether the path is a directory
-function M._format_path_for_at_mention(file_path)
+function M._format_path_for_at_mention(file_path, base_cwd)
   -- Input validation
   if not file_path or type(file_path) ~= "string" or file_path == "" then
     error("format_path_for_at_mention: file_path must be a non-empty string")
@@ -1530,29 +1548,19 @@ function M._format_path_for_at_mention(file_path)
   end
 
   local is_directory = vim.fn.isdirectory(file_path) == 1
+  local cwd = base_cwd or vim.fn.getcwd()
+  local relative_path = relative_to(file_path, cwd)
   local formatted_path = file_path
 
   if is_directory then
-    local cwd = vim.fn.getcwd()
-    if string.find(file_path, cwd, 1, true) == 1 then
-      local relative_path = string.sub(file_path, #cwd + 2)
-      if relative_path ~= "" then
-        formatted_path = relative_path
-      else
-        formatted_path = "./"
-      end
+    if relative_path then
+      formatted_path = relative_path ~= "" and relative_path or "./"
     end
     if not string.match(formatted_path, "/$") then
       formatted_path = formatted_path .. "/"
     end
-  else
-    local cwd = vim.fn.getcwd()
-    if string.find(file_path, cwd, 1, true) == 1 then
-      local relative_path = string.sub(file_path, #cwd + 2)
-      if relative_path ~= "" then
-        formatted_path = relative_path
-      end
-    end
+  elseif relative_path and relative_path ~= "" then
+    formatted_path = relative_path
   end
 
   return formatted_path, is_directory
@@ -1564,9 +1572,18 @@ function M._broadcast_at_mention(file_path, start_line, end_line)
     return false, "Claude Code integration is not running"
   end
 
+  -- Relative to where the active Claude session runs, which can differ from
+  -- Neovim's cwd (terminal.cwd / cwd_provider / git_repo_cwd); nil falls back.
+  local base_cwd
+  local terminal_ok, terminal = pcall(require, "claudecode.terminal")
+  if terminal_ok and terminal.get_active_session_cwd then
+    local ok_cwd, cwd = pcall(terminal.get_active_session_cwd)
+    base_cwd = ok_cwd and cwd or nil
+  end
+
   -- Safely format the path and handle validation errors
   local formatted_path, is_directory
-  local format_success, format_result, is_dir_result = pcall(M._format_path_for_at_mention, file_path)
+  local format_success, format_result, is_dir_result = pcall(M._format_path_for_at_mention, file_path, base_cwd)
   if not format_success then
     return false, format_result -- format_result contains the error message
   end
